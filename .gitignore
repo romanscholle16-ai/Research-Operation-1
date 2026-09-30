@@ -1,0 +1,62 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Secrets / environment
+.env
+*.env.local
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+data/cache/state/*
+!data/cache/state/.gitkeep
+data/cache/checkpoints/*
+!data/cache/checkpoints/.gitkeep
+
+# Data (generated / downloaded, not source)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Logs (generated)
+logs/**/*.log
+logs/**/*.jsonl
+
+# Results (generated)
+results/experiments/*
+!results/experiments/.gitkeep
+results/reports/*
+!results/reports/.gitkeep
+
+# Strategy artifacts (generated at runtime, not source)
+strategies/discovered/*
+!strategies/discovered/.gitkeep
+strategies/qualified/*
+!strategies/qualified/.gitkeep
+strategies/rejected/*
+!strategies/rejected/.gitkeep
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Local tool telemetry (not project source)
+.token-optimizer/
+
+# Editors
+.vscode/
+.idea/

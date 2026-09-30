@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "strategy-research-lab"
+version = "0.1.0"
+description = "Local autonomous trading-strategy research laboratory"
+requires-python = ">=3.12"
+readme = "README.md"
+dependencies = [
+    "python-dotenv>=1.0.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
