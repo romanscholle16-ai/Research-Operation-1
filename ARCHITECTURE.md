@@ -1,8 +1,8 @@
 # Architecture
 
 Status: reflects Phase 1 (Foundation), Phase 2 (Deterministic
-Backtesting Engine), and Phase 3 (Five Independent Research Systems).
-Updated as later phases land.
+Backtesting Engine), Phase 3 (Five Independent Research Systems), and
+Phase 4 (AI Research Layer). Updated as later phases land.
 
 ## Goals driving the design
 
@@ -512,6 +512,236 @@ is already preserved per experiment: parameters, rule configuration,
 execution assumptions, data range, and (via `backtest_run_id`) the full
 `BacktestResult` - trades, equity curve, and every Phase 2 metric.
 
+## Phase 4 - AI Research Layer
+
+`app/ai/` lets an AI agent run iterative research - propose experiments,
+see their results, propose more - entirely through Phase 3's existing
+`CampaignRunner`/`ExperimentRunner`. It is deliberately a thin layer:
+reasoning and hypothesis-forming are the AI's job; generating,
+validating, executing, and scoring experiments stays exactly where
+Phases 2-3 put it.
+
+```
+AI Research Layer (app/ai/)
+        v
+ResearchRequest             <- Phase 3, unchanged
+        v
+CampaignRunner               <- Phase 3, unchanged
+        v
+ExperimentRunner               <- Phase 3, unchanged
+        v
+Deterministic Backtesting Engine <- Phase 2, unchanged
+        v
+BacktestResult / Experiment Result
+        v
+AI Research Layer (next iteration)
+```
+
+### Why `app/ai/` never touches `app/backtesting/` or `app/systems/`
+
+Nothing in this phase modified either package - `git diff` for this
+phase touches only `app/core/events.py` (additive `EventType` members)
+and `app/database/schema.py` (additive migration 4), plus the new
+`app/ai/` and `tests/ai/` trees. `app/ai/translation.py` builds Phase
+3's own `ResearchRequest` subtypes and calls the matching
+`ResearchSystem.generate_experiments()` unchanged; `app/ai/agent.py`
+calls `CampaignRunner.run()` unchanged. `tests/ai/test_safety.py`
+enforces this structurally (not just by convention): it parses every
+file in `app/ai/` with `ast` and fails if anything imports or calls
+`run_backtest` - AST-based specifically so the module docstrings
+explaining this rule (which necessarily *mention* `run_backtest` in
+prose) can't trip a naive substring check.
+
+### Why the AI can't just hand over Python objects
+
+A `ResearchRequest` needs live objects - a `CandleSeries`, a `Callable`
+strategy factory - that an AI cannot produce as structured output. The
+AI instead produces an `ExperimentProposal` (`app/ai/decision.py`): a
+research-system name plus JSON-safe values (parameter lists, segment
+specs, simple cost-model numbers). Anything that requires actual
+Python logic - a rule variant's strategy factory, an execution variant's
+`FeeModel`/`SlippageModel` instances - the AI can only select **by
+name** from a `ResearchCatalog` (`app/ai/catalog.py`) that a human
+assembled ahead of time. The AI can pick from a pre-approved menu; it
+cannot write the menu.
+
+`app/ai/translation.py::proposal_to_experiment_definitions()` is the
+only place a proposal becomes real `ExperimentDefinition`s, always via
+the unmodified Phase 3 request/system pair:
+
+| `ExperimentProposal.research_system` | built request | source of "what varies" |
+|---|---|---|
+| `parameter_explorer` | `ParameterExplorerRequest` | `parameter_space: dict[str, list]` -> `ParameterSpace(ValueList(...))` |
+| `rule_explorer` | `RuleExplorerRequest` | `rule_variant_names` -> looked up in `catalog.rule_variants` |
+| `risk_execution` | `RiskExecutionRequest` | `execution_variant_names` -> looked up in `catalog.execution_variants` |
+| `market_conditions` | `MarketConditionRequest` | `segment_specs` (`chronological_chunks`/`volatility`/`day_of_week`) -> `app.systems.market_conditions.segmentation` functions |
+| `adversarial` | `AdversarialRequest` | `adversarial` dict (`worse_fee_rate`, `worse_slippage_bps`, `parameter_jitter`, `leave_out_chunk_count`) -> `AdversarialConfig` |
+
+`market_conditions`'s `session` segmentation (time-of-day windows) is
+NOT exposed to proposals - a UTC `datetime.time` pair isn't simply
+JSON-safe the way the other three methods' parameters are; deferred
+until there's an actual need, not built speculatively.
+
+### Validation (brief section 16)
+
+`app/ai/validation.py::validate_proposal()` runs BEFORE translation and
+returns a plain list of error strings (empty = valid) - `ResearchAgent`
+never repairs or guesses at a malformed proposal, it rejects it, logs
+the specific errors, and counts it toward `max_failed_experiments`
+(same budget as an experiment that failed for a real reason - a
+research session that only ever produces invalid proposals should stop,
+same as one whose experiments keep failing).
+
+### Provider abstraction and the mock provider (brief section 5/17)
+
+`AIProvider` (`app/ai/provider.py`) is one method: `invoke(request) ->
+AIInvocationResponse`. No Claude/Anthropic/Freebuff/Ollama-specific code
+exists anywhere in `app/ai/` - Phase 5+ can add a real provider without
+touching `ResearchAgent`. `MockAIProvider` (`app/ai/providers/mock.py`)
+is the only implementation this phase ships, following the same
+"scripted by index" pattern as `ScriptedStrategy` (Phase 2) and the
+`RuleVariant`/`ExecutionVariant` catalogs (Phase 3): `dict[int,
+ResearchDecision]` keyed by iteration. It is a real deliverable, not
+just a test double - it is the only way to actually run a
+`ResearchAgent` session until a real provider exists.
+
+### Structured decisions (brief section 6)
+
+`ResearchDecision` (`app/ai/decision.py`) is the entire AI/agent
+protocol - no free-form text is interpreted anywhere. It has no field
+that could express "change my limits" (verified directly:
+`tests/ai/test_safety.py::test_research_decision_has_no_way_to_carry_limits`
+inspects its dataclass fields).
+
+### Research context (brief section 11)
+
+`build_research_context()` (`app/ai/context.py`) is deliberately bounded:
+at most the last 10 experiments for this session (configurable), each
+reduced to its key metrics (net profit, trade count, win rate, max
+drawdown, profit factor, costs - via Phase 2's own
+`load_experiment_metrics()`), never full trade lists, never the whole
+database. `ResearchContext.summary()` is the only thing actually logged
+to `ai_actions` (see below) - a further-bounded, human-readable string,
+never the structured object or raw trade data.
+
+### `ResearchAgent`'s loop and stopping (brief sections 7-9)
+
+One iteration of `ResearchAgent.run()` (`app/ai/agent.py`):
+
+1. Check limits (below) - stop first if any are already exceeded.
+2. Build a `ResearchContext` from the current session state.
+3. Invoke the provider; `AIProviderError` -> stop immediately with
+   `PROVIDER_ERROR` (a session whose AI can't be reached cannot
+   meaningfully continue - see "Session status" below).
+4. Persist the `ResearchDecision`, emit `RESEARCH_DECISION_CREATED`.
+5. Validate + translate each `ExperimentProposal` -> `ExperimentDefinition`s;
+   invalid ones count toward `max_failed_experiments` and are skipped.
+6. Submit everything from this iteration as ONE `CampaignRunner.run()`
+   call (so a decision maps to exactly one campaign), trimmed to
+   whatever's left of the `max_experiments` budget.
+7. "Progress" = at least one experiment this iteration reached
+   `COMPLETED` with `duplicate_of_experiment_id IS NULL` (i.e. a
+   genuinely new result, not a dedup hit) - a simple, deterministic,
+   auditable definition, not sentiment analysis on the AI's own text.
+8. If the AI's decision carried a `stopping_reason`, honor it - AFTER
+   this iteration's experiments already ran, never instead of them.
+
+The AI request to stop is honored (Phase 4 brief: nothing says the AI
+can't stop itself early) but it can only ever shorten a session, never
+lengthen one past `ResearchLimits` - there is no code path from
+`ResearchDecision` back into `ResearchLimits` at all (see "Safety
+boundaries" below).
+
+### Human-controlled limits (brief section 8)
+
+`ResearchLimits` (`app/ai/limits.py`) is a frozen dataclass
+(`max_iterations=10`, `max_experiments=50`, `max_failed_experiments=5`,
+`max_consecutive_no_progress=3` by default). `ResearchAgent` takes one
+by constructor argument and only ever reads it - nowhere in `app/ai/`
+is a `ResearchLimits` constructed from AI output (verified: `tests/ai/
+test_safety.py::test_agent_never_constructs_researchlimits_from_ai_output`
+greps `agent.py` for a bare `ResearchLimits(` call and finds none).
+
+### Session status: COMPLETED vs FAILED
+
+A session that stops for any reason EXCEPT a provider error is marked
+`COMPLETED` - hitting `max_iterations`, `max_experiments`,
+`max_failed_experiments`, or `max_consecutive_no_progress`, or the AI
+asking to stop, are all normal, successful endings of a bounded research
+process. Only `PROVIDER_ERROR` marks a session `FAILED` - the session
+couldn't continue for a reason outside the research logic itself.
+
+### Persistence and resumability (brief section 12)
+
+Three new tables (migration 4, `app/database/schema.py`):
+
+- `ai_research_sessions` - objective, status, iteration, the four limit
+  values (denormalized onto the row for easy inspection), running
+  counters (`experiments_run`/`experiments_failed`/
+  `consecutive_no_progress`), stopping reason, provider/model, timestamps.
+- `ai_research_decisions` - one row per iteration: hypothesis, reasoning
+  summary, the full `ExperimentProposal` list (JSON), analysis tasks,
+  stopping reason, confidence.
+- `ai_research_session_campaigns` - links each iteration's `research_
+  campaigns` row (Phase 3) to the session, so "which experiments did
+  this session run" is reconstructable via a join (`app.ai.persistence.
+  list_session_experiments()`).
+
+AI invocation audit logging (brief section 13) reuses Phase 1's
+existing `ai_actions` table rather than adding a fourth - its columns
+(`provider`, `action_type`, `related_id`, `prompt_summary`,
+`result_summary`, `metadata`) already match what section 13 asks for.
+`prompt_summary`/`result_summary` are always the bounded
+`ResearchContext.summary()`/`AIInvocationResponse.raw_summary` strings,
+never a raw prompt/response dump.
+
+Because every field that matters is written to SQLite as it changes
+(not accumulated in memory and flushed at the end), a session's state
+can be inspected or reconstructed at any point via `app.ai.persistence`
+- the mechanism, not a separately-implemented "resume" code path, is
+what makes a session survive interruption within this phase's scope.
+
+### Safety boundaries (brief section 15)
+
+Concretely, not just by policy:
+
+- **Can't bypass `CampaignRunner`.** No file in `app/ai/` imports or
+  calls `run_backtest` (AST-verified, see above).
+- **Can't expand its own budget.** `ResearchDecision` has no field for
+  limits; `ResearchLimits` is frozen; nothing constructs one from AI
+  output (all three verified in `tests/ai/test_safety.py`).
+- **Can't delete anything.** No file in `app/ai/` contains a `DELETE
+  FROM` statement (grepped) - there is no delete method anywhere in the
+  package, structurally, not just by discipline.
+- **Can't modify Phase 1-3 code or global config, install software, touch
+  Git, or run arbitrary shell commands** - trivially true: nothing in
+  `app/ai/` does any of these things; it only reads context, calls an
+  `AIProvider`, and calls `CampaignRunner`.
+- **Can't reach live trading/exchange systems** - none exist in this
+  codebase at all yet, and `tests/ai/test_safety.py` greps for common
+  markers (`place_order`, `live_trading`, `broker`, ...) as a tripwire
+  for if one is ever added carelessly near this package.
+- **Can't alter a `BacktestResult` or historical data** - the AI only
+  ever *reads* metrics through `ResearchContext`; nothing in `app/ai/`
+  writes to `trades`, `experiment_results`, or `experiments`
+  (`tests/ai/test_integration.py::test_ai_analysis_never_alters_
+  backtest_results` checks a prior run's `trades` rows are byte-identical
+  after a second, unrelated session runs).
+
+### Concurrency and determinism (brief sections 11/19)
+
+`ResearchAgent.run()` executes one session sequentially - the AI itself
+may be nondeterministic against a real provider, but everything
+downstream of a `ResearchDecision` (validation, translation,
+fingerprinting, execution, persistence) is exactly Phase 2/3's existing
+deterministic code, unmodified. "AI-generated experiment configurations
+must be normalized before fingerprinting" is satisfied structurally,
+not by a separate normalization step: a proposal becomes a real
+`ResearchRequest` and flows through Phase 3's `generate_experiments()`
++ Phase 2's `compute_fingerprint()`/`compute_experiment_fingerprint()`
+exactly as if a human had typed the equivalent request by hand - there
+is no AI-specific fingerprinting code path to diverge.
+
 ## Documented deviations from the Phase 1 brief's example tree
 
 - **`logs/` subfolders.** The brief's example tree lists
@@ -532,6 +762,17 @@ execution assumptions, data range, and (via `backtest_run_id`) the full
   but intentionally contain nothing beyond a docstring - no speculative
   interfaces or base classes, since Phase 1 has no evidence yet of what
   those phases will actually need.
+- **The AI research layer was built at `app/ai/`, not `app/agents/`.**
+  Phase 1's ARCHITECTURE.md originally earmarked `app/agents/` for it;
+  the Phase 4 brief explicitly allowed `app/ai/` "or another clearly
+  separated package if the existing architecture suggests a better
+  location," and `app/ai/` was chosen as the clearer, less overloaded
+  name (an "agent" in this codebase could otherwise be confused with a
+  Supervisor-restarted worker process). `app/agents/` remains an empty,
+  unused placeholder - not deleted or repurposed, since removing an
+  existing placeholder package wasn't asked for and a future phase may
+  still want it for something else (e.g. non-research AI use, like
+  Supervisor's AI-assisted diagnosis).
 
 ## Future expansion points
 
@@ -546,11 +787,16 @@ execution assumptions, data range, and (via `backtest_run_id`) the full
   `ExperimentRecord` already carries parameters, rule/execution
   configuration, data range, and a `backtest_run_id` pointing at the full
   `BacktestResult`.
-- **AI research layer** (`app/agents/`): proposes new experiments by
-  constructing `ResearchRequest`s and submitting them to `CampaignRunner`
-  - never by calling `run_backtest()` or computing P&L directly - reads
-  `ExperimentRecord`/`BacktestResult` for its own analysis, records its
-  own actions via `ai_actions` + `EventType.AI_INVOKED` / `AI_PATCH_CREATED`.
+- **Real AI providers** (`app/ai/providers/`): Phase 4 built the
+  provider abstraction and `MockAIProvider` only. Claude/Freebuff/Ollama-
+  backed providers, and switching between them, are Phase 5+ - see
+  "Phase 4 - AI Research Layer" above. Adding one means implementing
+  `AIProvider.invoke()`; nothing in `ResearchAgent` should need to change.
+- **Strategy qualification consuming AI research sessions**: an
+  `ai_research_sessions` row plus its linked `research_experiments`
+  already carries everything a qualification system (see "Strategy
+  discovery/qualification" above) would want to know about how a
+  strategy was investigated, not just what its best result was.
 - **Supervisor Agent** (`app/supervisor/`): polls `system_status`, writes
   `supervisor_issues`, drives deterministic recovery first, AI-assisted
   diagnosis only after that fails, records via

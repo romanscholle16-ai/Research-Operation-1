@@ -13,7 +13,7 @@ future phases can add tables/columns without breaking existing databases.
 
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -205,10 +205,58 @@ CREATE INDEX IF NOT EXISTS idx_research_experiments_fingerprint ON research_expe
 CREATE INDEX IF NOT EXISTS idx_research_experiments_parent ON research_experiments(parent_experiment_id);
 """
 
+_MIGRATION_4 = """
+CREATE TABLE IF NOT EXISTS ai_research_sessions (
+    id                              TEXT PRIMARY KEY,
+    objective                       TEXT NOT NULL,
+    status                          TEXT NOT NULL DEFAULT 'created',
+    iteration                       INTEGER NOT NULL DEFAULT 0,
+    max_iterations                  INTEGER NOT NULL,
+    max_experiments                 INTEGER NOT NULL,
+    max_failed_experiments          INTEGER NOT NULL,
+    max_consecutive_no_progress     INTEGER NOT NULL,
+    experiments_run                 INTEGER NOT NULL DEFAULT 0,
+    experiments_failed              INTEGER NOT NULL DEFAULT 0,
+    consecutive_no_progress         INTEGER NOT NULL DEFAULT 0,
+    stopping_reason                 TEXT,
+    provider_name                   TEXT,
+    model_name                      TEXT,
+    metadata                        TEXT,
+    created_at                      TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at                      TEXT,
+    completed_at                    TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ai_research_sessions_status ON ai_research_sessions(status);
+
+CREATE TABLE IF NOT EXISTS ai_research_decisions (
+    id                      TEXT PRIMARY KEY,
+    session_id              TEXT NOT NULL REFERENCES ai_research_sessions(id),
+    iteration                INTEGER NOT NULL,
+    hypothesis                TEXT,
+    reasoning_summary          TEXT,
+    requested_experiments       TEXT,
+    analysis_tasks                TEXT,
+    stopping_reason                TEXT,
+    confidence                       REAL,
+    created_at                        TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_research_decisions_session ON ai_research_decisions(session_id);
+
+CREATE TABLE IF NOT EXISTS ai_research_session_campaigns (
+    id              TEXT PRIMARY KEY,
+    session_id      TEXT NOT NULL REFERENCES ai_research_sessions(id),
+    campaign_id     TEXT NOT NULL REFERENCES research_campaigns(id),
+    iteration       INTEGER NOT NULL,
+    created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ai_research_session_campaigns_session ON ai_research_session_campaigns(session_id);
+"""
+
 # Ordered list of (version, sql) migrations. Add new entries here in future
 # phases; never edit an already-released migration in place.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _MIGRATION_1),
     (2, _MIGRATION_2),
     (3, _MIGRATION_3),
+    (4, _MIGRATION_4),
 ]

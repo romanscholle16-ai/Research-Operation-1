@@ -293,3 +293,119 @@ supports it - see ARCHITECTURE.md "Concurrency foundation" - but
 `Application`'s lifecycle or a CLI/scheduler, and populating the
 `strategies` table (experiments still record strategy name/version as
 plain strings).
+
+## Phase 4 - AI Research Layer
+
+**Completed:** 2026-09-29
+**Status:** Complete
+
+### Starting point
+
+Phase 1-3 baseline (155 tests) re-verified green before any change.
+`app/ai/` did not exist; `app/agents/` was (and remains) an empty
+placeholder. No changes were made to `app/backtesting/` or
+`app/systems/` - only additive database/event extensions elsewhere.
+
+### What was built
+
+An AI research layer (`app/ai/`, 12 modules, 66 new tests in
+`tests/ai/`) implementing the Objective -> Hypothesis -> Experiment ->
+Backtest -> Result -> Analysis -> next Hypothesis loop from a
+provider-agnostic `AIProvider` interface (`MockAIProvider` the only
+implementation this phase ships), typed/validated AI output
+(`ResearchDecision`/`ExperimentProposal`), a `ResearchCatalog` the AI
+can select named rule/execution variants from but never author, a
+bounded `ResearchContext` builder, deterministic proposal validation and
+translation into Phase 3's own `ResearchRequest` types (zero
+duplication of the Phase 3 experiment model), a `ResearchAgent` bounded
+by a frozen, human-supplied `ResearchLimits`, three new database tables
+(migration 4), and eight new `EventType` members. Full design writeup:
+ARCHITECTURE.md "Phase 4 - AI Research Layer".
+
+### Key decisions
+
+- **Built at `app/ai/`, not the Phase-1-earmarked `app/agents/`.** The
+  Phase 4 brief explicitly allowed either; `app/ai/` was chosen as
+  clearer and less overloaded ("agent" already means something
+  different elsewhere in this codebase - a Supervisor-managed worker
+  process). `app/agents/` was left untouched rather than deleted or
+  repurposed, since that wasn't asked for.
+- **The AI never produces `ResearchRequest`s or `ExperimentDefinition`s
+  directly - only `ExperimentProposal`s, translated by deterministic
+  code.** A `ResearchRequest` needs live Python objects (a
+  `CandleSeries`, a `Callable` strategy factory) that structured AI
+  output cannot carry. Anything requiring real logic (a rule variant's
+  strategy factory, an execution variant's cost-model instances) the AI
+  can only select **by name** from a human-assembled `ResearchCatalog` -
+  it has a menu, not a pen. `app/ai/translation.py` then builds the
+  exact same Phase 3 request/system pair a human would, so
+  fingerprinting/deduplication/execution never diverge by who produced
+  the request (the brief's "AI-generated experiment configurations must
+  be normalized before fingerprinting" - satisfied structurally, not by
+  a separate normalization step).
+- **A session is `COMPLETED` unless it stopped on `PROVIDER_ERROR`,
+  which is `FAILED`.** Hitting any of the four limits, or the AI asking
+  to stop, are all normal, successful endings of a bounded process;
+  only an unreachable/broken AI provider represents an actual failure
+  to complete the work.
+- **"Progress" is defined as "at least one experiment this iteration
+  reached `COMPLETED` with no `duplicate_of_experiment_id`"** - simple,
+  deterministic, and auditable, deliberately not an attempt to have the
+  agent judge its own research quality (that judgment - qualification -
+  is explicitly out of scope, per the brief's section 9: the AI reasons
+  about robustness across many metrics, it does not optimize one).
+- **`ResearchLimits` is a frozen dataclass passed once by the caller;
+  nothing in `app/ai/` ever constructs one from AI output, and
+  `ResearchDecision` has no field that could express new limits at all.**
+  This is what makes "the AI cannot expand its own research budget" true
+  by construction rather than by convention - verified directly in
+  `tests/ai/test_safety.py` (frozen-ness, absent fields, and an
+  `agent.py`-source grep for a bare `ResearchLimits(` call).
+- **AI invocation audit logging reuses Phase 1's `ai_actions` table**
+  rather than adding a fourth new one - its columns already matched the
+  brief's section 13 requirements exactly, and `prompt_summary`/
+  `result_summary` are always the already-bounded
+  `ResearchContext.summary()`/`AIInvocationResponse.raw_summary`
+  strings, never a raw dump.
+- **The "AI cannot bypass `CampaignRunner`" safety test is AST-based,
+  not a substring search.** A naive `"run_backtest" not in source` check
+  over `app/ai/`'s files false-positived on the module docstrings
+  themselves, which legitimately explain (in prose) that the package
+  must never call `run_backtest` - the explanation mentions the
+  forbidden word. Parsing with `ast` and checking only real `Call`/
+  `ImportFrom` nodes fixed it without weakening what the check actually
+  proves; `tests/ai/test_translation.py`'s companion check uses bytecode
+  `co_names` introspection for the same reason.
+
+### Verification performed
+
+- `pytest -v`: 221/221 passed (155 from Phases 1-3 unchanged + 66 new),
+  run before starting (baseline check) and after every module was wired
+  together.
+- Three manual end-to-end smoke tests via the real venv interpreter
+  (outside pytest): (1) a full `ResearchAgent` session with
+  `MockAIProvider` proposing a 2-value parameter sweep then stopping
+  itself - confirmed decisions/campaigns/experiments/events all
+  persisted and linked correctly on the first attempt; (2) an
+  `AlwaysFailingAIProvider` session - confirmed `FAILED` status,
+  `provider_error` stopping reason, zero iterations attempted; (3) a
+  `max_iterations=3` session with a provider that never requests a stop
+  - confirmed the agent stopped after exactly 3 provider invocations,
+  never a 4th.
+
+### Deferred to later phases
+
+Everything in the Phase 4 brief's "DO NOT IMPLEMENT YET" section: real
+Claude/Freebuff/Ollama provider integration, automatic provider
+switching, browser automation, internet strategy discovery, autonomous
+strategy discovery, strategy qualification, Monte Carlo, ML regime
+detection, live trading, exchange APIs, large historical data downloads,
+the professional dashboard, a Windows `.exe`, the Supervisor Agent, 24/7
+autonomous operation, Windows services, distributed workers, and
+sophisticated multi-agent systems. Also not built (future scope, not
+prohibited): wiring `ResearchAgent` into `Application`'s lifecycle or a
+CLI/scheduler, and the `market_conditions` "session" (time-of-day
+window) segmentation method for AI proposals specifically (not simply
+JSON-safe the way the other three segmentation methods are - the other
+Phase 3 systems still support it when called directly, just not yet
+through an `ExperimentProposal`).
