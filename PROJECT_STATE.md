@@ -1,6 +1,6 @@
 # Project State
 
-**Active phase:** Phase 2 - Deterministic Backtesting Engine
+**Active phase:** Phase 3 - Five Independent Research Systems
 **Status:** Complete
 **Last updated:** 2026-09-29
 
@@ -74,20 +74,50 @@ phases.
   database persistence/migration compatibility. Synthetic data only - no
   real market data downloaded.
 
+- Five independent research systems (`app/systems/`, 18 modules):
+  Parameter Explorer, Rule/Logic Explorer, Risk/Execution Optimizer,
+  Market-Condition Tester, and an Adversarial Research System, all
+  sharing a common `ResearchSystem`/`ResearchRequest` interface and an
+  `ExperimentDefinition` -> `ExperimentRunner`/`CampaignRunner` ->
+  `run_backtest()` pipeline. Deterministic parameter generation, explicit
+  rule variants, configurable execution/risk variants, basic candle
+  segmentation (volatility median-split, day-of-week, session windows,
+  chronological chunks/leave-one-out), and adversarial perturbations
+  (worse costs, parameter jitter, leave-one-period-out) - none of them
+  compute P&L or rank results; all of it flows through Phase 2's
+  `run_backtest()`. Deterministic experiment fingerprinting and
+  deduplication (an experiment matching an already-completed one's exact
+  configuration is marked complete without re-running the engine).
+  Campaigns group experiments with live-recomputed counts. Persisted into
+  two new tables (schema migration 3): `research_campaigns`,
+  `research_experiments`. See ARCHITECTURE.md "Phase 3 - Five Independent
+  Research Systems" for the full design, including a
+  parameter-propagation bug caught and fixed during development (two
+  differently-parameterized experiments were colliding on Phase 2's own
+  fingerprint unique index).
+- 66 new automated tests (`tests/systems/`, 155 total with Phases 1-2),
+  all passing: parameter-space generation and determinism, experiment
+  fingerprinting, all five systems' experiment generation, segmentation
+  functions, experiment/campaign execution (happy path, deduplication,
+  deterministic failure handling, event emission), and database
+  persistence/migration compatibility. Synthetic data and mock strategies
+  only - no real market data.
+
 ## What has been completed
 
-Phase 1 (all 15 requirements) plus Phase 2 (all 24 requirements) from
-their respective briefs: see PHASE_HISTORY.md for what each phase built
-and why.
+Phase 1 (all 15 requirements), Phase 2 (all 24 requirements), and
+Phase 3 (all 21 requirements) from their respective briefs: see
+PHASE_HISTORY.md for what each phase built and why.
 
-## What remains (explicitly out of Phase 2 scope)
+## What remains (explicitly out of Phase 3 scope)
 
 - Actual trading strategies (only mock/scripted ones exist, solely to
-  validate the engine), the five research systems, autonomous strategy
-  discovery/experiment loops, the full AI research layer, the full
-  Supervisor Agent, the full dashboard, live trading / exchange
-  execution, and large historical data downloads. See CURRENT_TASK.md and
-  ARCHITECTURE.md's "Future expansion points".
+  validate the engine and research systems), AI strategy discovery
+  (Claude/Freebuff/Ollama integration), autonomous strategy discovery,
+  strategy qualification, live trading / exchange execution, the full
+  dashboard, the Supervisor Agent, a 24/7 autonomous loop, Monte Carlo,
+  sophisticated regime detection, and large historical data downloads.
+  See CURRENT_TASK.md and ARCHITECTURE.md's "Future expansion points".
 
 ## Important technical state
 
@@ -107,8 +137,17 @@ and why.
   is not yet wired into `Application` - it is called directly
   (`app.backtesting.run_backtest`), which is sufficient until a research
   system or CLI needs to trigger runs through the app lifecycle.
-- Database schema is now at version 2 (`app/database/schema.py`):
+- Database schema is now at version 3 (`app/database/schema.py`):
   migration 2 added `experiments.strategy_name`/`fingerprint` (unique
   indexed) and `trades.gross_pnl`/`slippage_cost`/`return_pct`/
-  `exit_reason`. Migrations are additive/idempotent - an existing Phase 1
-  database upgrades automatically on next `initialize_schema()` call.
+  `exit_reason`; migration 3 added `research_campaigns` and
+  `research_experiments`. Migrations are additive/idempotent - an
+  existing Phase 1/2 database upgrades automatically on next
+  `initialize_schema()` call.
+- Research systems are invoked directly (`ExperimentRunner`/
+  `CampaignRunner` called from Python), same as the backtesting engine -
+  not yet wired into `Application`'s lifecycle or any CLI/scheduler.
+  `strategies` table is still unpopulated; Phase 3 experiments record
+  `strategy_name`/`strategy_version` as plain strings, not a `strategies`
+  row - see ARCHITECTURE.md "Future expansion points" for why that's
+  deferred to strategy discovery/qualification.

@@ -1,10 +1,13 @@
 """Minimal strategies that exist solely to validate the backtesting
-engine (Phase 2 brief section 4) - not real trading strategies.
+engine (Phase 2 brief section 4) and the Phase 3 research systems - not
+real trading strategies.
 """
 
 from __future__ import annotations
 
-from app.backtesting.signals import Signal
+from typing import Any
+
+from app.backtesting.signals import Signal, SignalAction
 from app.backtesting.strategy import Strategy, StrategyContext
 
 
@@ -55,3 +58,59 @@ class RecordingStrategy(Strategy):
     def on_bar(self, context: StrategyContext) -> list[Signal]:
         self.seen_contexts.append(context)
         return self.inner.on_bar(context)
+
+
+class FixedTradeStrategy(Strategy):
+    """Opens on the first candle and closes on the third (index 2), with
+    quantity/side/stop/target read from `params`. Generic and
+    parameterizable - used as the `strategy_factory` target for Phase 3
+    research-system tests (Parameter Explorer, Risk/Execution Optimizer,
+    Market-Condition Tester, Adversarial), and as the payload for
+    Rule Explorer's variant factories (a variant just wraps this with
+    different fixed params, e.g. side="short").
+
+    Requires a series of at least 4 candles (a signal at index 0 fills at
+    index 1; a close signal at index 2 fills at index 3) - the same shape
+    Phase 2's own tests use.
+    """
+
+    def __init__(self, params: dict[str, Any] | None = None, *, name: str = "fixed_trade", version: str = "1") -> None:
+        params = params or {}
+        self.name = name
+        self.version = version
+        self.params = params
+        self.qty = params.get("qty", 1.0)
+        self.side = params.get("side", "long")
+        self.stop_loss = params.get("stop_loss")
+        self.take_profit = params.get("take_profit")
+
+    def on_bar(self, context: StrategyContext) -> list[Signal]:
+        index = len(context.history) - 1
+        if index == 0 and context.position is None:
+            action = SignalAction.OPEN_LONG if self.side == "long" else SignalAction.OPEN_SHORT
+            return [
+                Signal(
+                    action,
+                    timestamp=context.current_candle.timestamp,
+                    quantity=self.qty,
+                    stop_loss=self.stop_loss,
+                    take_profit=self.take_profit,
+                )
+            ]
+        if index == 2 and context.position is not None:
+            return [Signal(SignalAction.CLOSE, timestamp=context.current_candle.timestamp)]
+        return []
+
+
+class AlwaysFailsStrategy(Strategy):
+    """Raises on the first bar. Used to test deterministic failure
+    handling in ExperimentRunner - never a real strategy."""
+
+    name = "always_fails"
+    version = "1"
+
+    def __init__(self, params: dict[str, Any] | None = None) -> None:
+        pass
+
+    def on_bar(self, context: StrategyContext) -> list[Signal]:
+        raise RuntimeError("intentional failure for testing")

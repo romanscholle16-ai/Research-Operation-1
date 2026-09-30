@@ -13,7 +13,7 @@ future phases can add tables/columns without breaking existing databases.
 
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -156,9 +156,59 @@ ALTER TABLE trades ADD COLUMN return_pct REAL;
 ALTER TABLE trades ADD COLUMN exit_reason TEXT;
 """
 
+_MIGRATION_3 = """
+CREATE TABLE IF NOT EXISTS research_campaigns (
+    id                  TEXT PRIMARY KEY,
+    strategy_name       TEXT,
+    research_system     TEXT NOT NULL,
+    purpose             TEXT,
+    configuration       TEXT,
+    status              TEXT NOT NULL DEFAULT 'created',
+    experiment_count    INTEGER NOT NULL DEFAULT 0,
+    completed_count     INTEGER NOT NULL DEFAULT 0,
+    failed_count        INTEGER NOT NULL DEFAULT 0,
+    metadata            TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at          TEXT,
+    completed_at        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_campaigns_status ON research_campaigns(status);
+
+CREATE TABLE IF NOT EXISTS research_experiments (
+    id                          TEXT PRIMARY KEY,
+    campaign_id                 TEXT REFERENCES research_campaigns(id),
+    research_system             TEXT NOT NULL,
+    strategy_name                TEXT NOT NULL,
+    strategy_version             TEXT NOT NULL,
+    parameters                   TEXT,
+    rule_configuration           TEXT,
+    execution_configuration      TEXT,
+    data_identity                 TEXT,
+    timeframe                     TEXT,
+    data_start                    TEXT,
+    data_end                      TEXT,
+    parent_experiment_id          TEXT REFERENCES research_experiments(id),
+    status                        TEXT NOT NULL DEFAULT 'created',
+    fingerprint                   TEXT NOT NULL,
+    backtest_run_id               TEXT REFERENCES experiments(id),
+    result_fingerprint            TEXT,
+    duplicate_of_experiment_id    TEXT REFERENCES research_experiments(id),
+    failure_info                  TEXT,
+    metadata                      TEXT,
+    created_at                    TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at                    TEXT,
+    completed_at                  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_campaign ON research_experiments(campaign_id);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_status ON research_experiments(status);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_fingerprint ON research_experiments(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_research_experiments_parent ON research_experiments(parent_experiment_id);
+"""
+
 # Ordered list of (version, sql) migrations. Add new entries here in future
 # phases; never edit an already-released migration in place.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _MIGRATION_1),
     (2, _MIGRATION_2),
+    (3, _MIGRATION_3),
 ]

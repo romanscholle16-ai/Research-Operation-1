@@ -1,7 +1,8 @@
 # Architecture
 
-Status: reflects Phase 1 (Foundation) and Phase 2 (Deterministic
-Backtesting Engine). Updated as later phases land.
+Status: reflects Phase 1 (Foundation), Phase 2 (Deterministic
+Backtesting Engine), and Phase 3 (Five Independent Research Systems).
+Updated as later phases land.
 
 ## Goals driving the design
 
@@ -70,11 +71,11 @@ app/state       StateManager: component status (system_status table),
 ### Placeholder packages (not yet implemented)
 
 `app/api`, `app/dashboard`, `app/supervisor`, `app/research`,
-`app/systems`, `app/agents` still exist as empty packages (single
-docstring `__init__.py`) so the import structure and directory layout are
-stable for later phases to build into, without any code depending on
-them yet. `app/backtesting` is no longer a placeholder - see "Phase 2"
-below.
+`app/agents` still exist as empty packages (single docstring
+`__init__.py`) so the import structure and directory layout are stable
+for later phases to build into, without any code depending on them yet.
+`app/backtesting` and `app/systems` are no longer placeholders - see
+"Phase 2" and "Phase 3" below.
 
 ## Data flow (Phase 1)
 
@@ -299,6 +300,218 @@ table would misrepresent it as a real discovered strategy; that
 association is Phase 3+'s concern once strategies are actually
 discovered and tracked as first-class rows.
 
+## Phase 3 - Five Independent Research Systems
+
+`app/systems/` builds five independent research systems on top of the
+Phase 2 engine. None of them compute P&L, fees, slippage, drawdown,
+expectancy, or profit factor - they only ever build `ExperimentDefinition`s
+and hand them to `ExperimentRunner`, which is the sole caller of
+`app.backtesting.run_backtest()` in this package.
+
+### Experiment lineage
+
+```
+Strategy -> Research Campaign -> Experiment -> Backtest Run -> Backtest Result
+```
+
+`Strategy` here means "strategy name/version" (still just a string pair -
+no `strategies` table row yet, same as Phase 2). "Backtest Run"/"Backtest
+Result" are exactly Phase 2's `experiments` table row and `BacktestResult`
+- Phase 3 does not touch either concept, it sits *above* them:
+
+- `ExperimentDefinition` (`app/systems/experiment.py`) - the plan for one
+  backtest, produced by a research system: strategy factory, resolved
+  parameters, rule configuration, candles, and a `BacktestConfig`. Not
+  persisted directly; it holds live objects (a `CandleSeries`, a
+  `Callable`).
+- `ExperimentRecord` - the persisted row (`research_experiments` table)
+  after `ExperimentRunner` processes a definition: same facts, but
+  serializable only (no live objects), plus status/timestamps/failure
+  info/links to the actual backtest run.
+- `CampaignRecord` (`app/systems/campaign.py`) - the persisted row
+  (`research_campaigns` table) grouping the experiments from one
+  `ResearchSystem.generate_experiments()` call submitted to
+  `CampaignRunner`.
+
+### Common interface
+
+`ResearchSystem.generate_experiments(request) -> list[ExperimentDefinition]`
+(`app/systems/base.py`) is the only method every system implements.
+`ResearchRequest` carries the fields every system needs (strategy
+factory/name/version, candles, execution config, base parameters); each
+concrete request type (`ParameterExplorerRequest`, `RuleExplorerRequest`,
+...) adds exactly one more field for what that system varies. A system
+never calls `run_backtest()` itself.
+
+```
+app/systems/
+    experiment.py        ExperimentDefinition, ExperimentRecord, ExperimentStatus
+    campaign.py            CampaignRecord, CampaignStatus
+    base.py                  ResearchSystem, ResearchRequest
+    parameter_space.py         Fixed/ValueList/ValueRange/Categorical + ParameterSpace
+    fingerprint.py                compute_experiment_fingerprint()
+    persistence.py                   research_campaigns/research_experiments DB access
+    runner.py                          ExperimentRunner, CampaignRunner
+    parameter_explorer/                  ParameterExplorer
+    rule_explorer/                         RuleExplorer, RuleVariant
+    risk_execution/                          RiskExecutionOptimizer, ExecutionVariant
+    market_conditions/                         MarketConditionTester + segmentation.py
+    adversarial/                                 AdversarialResearchSystem, AdversarialConfig
+```
+
+### The five systems
+
+- **Parameter Explorer** - `ParameterSpace.generate_combinations()`
+  (deterministic Cartesian product, sorted parameter-name order, no
+  randomness/AI) produces one experiment per combination. Generic: the
+  strategy comes from `request.strategy_factory`, never hardcoded.
+- **Rule/Logic Explorer** - takes a tuple of `RuleVariant`s, each an
+  explicit, pre-authored `(name, strategy_factory, description)`. One
+  experiment per variant; `rule_configuration` on the resulting
+  experiment names exactly which variant produced it. Deliberately does
+  NOT generate or synthesize logic itself (brief: "explicit strategy
+  variants rather than allowing arbitrary uncontrolled code generation").
+- **Risk/Execution Optimizer** - takes a tuple of `ExecutionVariant`s,
+  each overriding a subset of `BacktestConfig`'s fee/slippage/intrabar-
+  policy/starting-capital fields (`dataclasses.replace`, unset fields
+  inherit the request's base config). No leverage/margin - Phase 2 was
+  not extended to add it, per the brief's explicit instruction not to
+  unless a concrete test requires it.
+- **Market-Condition Tester** - takes pre-built `Segment`s
+  (`app/systems/market_conditions/segmentation.py`) and runs one
+  experiment per segment. Segmentation is deliberately basic and
+  explainable: a median split on candle range (volatility), calendar
+  day-of-week, fixed time-of-day session windows, and equal-sized
+  chronological chunks - no regime-detection ML. A `Segment`'s candles
+  need not be contiguous; `CandleSeries` only requires strictly
+  increasing timestamps (Phase 2), so a filtered, non-contiguous subset
+  (e.g. "every Tuesday") is a valid series.
+- **Adversarial Research System** - generates a baseline plus perturbed
+  variants: worse fees, worse slippage, one-parameter-at-a-time jitter,
+  and leave-one-chronological-chunk-out (reusing the Market-Condition
+  Tester's segmentation module via a new
+  `segment_leave_one_out_chronological()` helper). Every non-baseline
+  experiment's `parent_experiment_id` points at the baseline. This
+  system only *generates* the perturbed experiments - it has no
+  "best result" concept and nothing here judges whether a strategy
+  survived them; that comparison is the future qualification system's
+  job (brief section 14, explicitly deferred).
+
+### Experiment execution and deduplication
+
+`ExperimentRunner.execute(definition, campaign_id=None)`
+(`app/systems/runner.py`):
+
+1. Computes `(fingerprint, data_identity) = compute_experiment_fingerprint
+   (definition)` - a hash over research system, strategy name/version,
+   resolved parameters, rule configuration, execution assumptions
+   (reusing Phase 2's own `ExecutionAssumptions.to_dict()`), data identity
+   (reusing Phase 2's `compute_data_identity()`), and timeframe. The
+   experiment's own `id`/campaign/timestamps are excluded on purpose -
+   the fingerprint identifies the *configuration*, not the *request*.
+2. Inserts a `CREATED` row and emits `EXPERIMENT_CREATED`.
+3. Looks up an existing `COMPLETED`, non-duplicate experiment with the
+   same fingerprint (`find_completed_by_fingerprint`, which excludes rows
+   that are themselves marked as duplicates, so lookups always resolve to
+   the original - no duplicate-of-duplicate chains). If found: marks this
+   experiment `COMPLETED` pointing at the existing `backtest_run_id`,
+   emits `EXPERIMENT_SKIPPED_DUPLICATE`, and returns WITHOUT calling
+   `run_backtest()`.
+4. Otherwise: `RUNNING` + `EXPERIMENT_STARTED`, builds the strategy
+   (`definition.build_strategy()`), calls `run_backtest()`, persists via
+   Phase 2's `app.backtesting.persistence.save_backtest_result()`, marks
+   `COMPLETED` + `EXPERIMENT_COMPLETED` with `backtest_run_id`/
+   `result_fingerprint` set.
+5. Any exception during step 4 is caught, recorded as `FAILED` with
+   `failure_info` (type, message, traceback), `EXPERIMENT_FAILED` is
+   emitted, and **the exception is not re-raised** - so one bad
+   experiment in a campaign of many does not abort the rest (brief
+   section 5's "records errors deterministically").
+
+A bug caught during development here: `definition.parameters` must be
+copied into `BacktestConfig.strategy_params` before calling
+`run_backtest()` - Phase 2's own fingerprint (`app/backtesting/
+engine.py`) hashes `config.strategy_params`, and `experiments.fingerprint`
+is Phase-2-unique-indexed. Without the copy, two Phase-3 experiments that
+only differed by `definition.parameters` (e.g. a Parameter Explorer qty
+sweep) produced the SAME Phase-2 fingerprint and the second `INSERT`
+raised `sqlite3.IntegrityError: UNIQUE constraint failed: experiments.
+fingerprint` - caught by a manual smoke test before the automated test
+suite was written. Fixed in `ExperimentRunner.execute()`:
+`config = dataclasses.replace(definition.execution_config,
+strategy_params=definition.parameters)`. This also fixed a second,
+related gap: `StrategyContext.params` would otherwise have been empty
+for every Phase 3 experiment.
+
+`CampaignRunner.run(definitions, ...)` creates a campaign row, emits
+`CAMPAIGN_CREATED`/`_STARTED`, calls `ExperimentRunner.execute()` for each
+definition in order, recomputes `experiment_count`/`completed_count`/
+`failed_count` from the `research_experiments` rows themselves
+(`refresh_campaign_counts` - a fresh `COUNT(*)` each time rather than
+incrementing counters, so it can't drift and stays correct under future
+concurrent execution), then emits `CAMPAIGN_COMPLETED`.
+
+### Concurrency foundation (brief section 11)
+
+No multiprocessing/threading was added this phase. What was designed for
+it: `ExperimentRunner.execute()` is a pure function of `(definition,
+campaign_id, db)` with no state held between calls, so it's safe to call
+from a worker pool today without modification. `CampaignRunner.run()`'s
+`for definition in definitions: self._experiment_runner.execute(...)`
+loop is the one line a future concurrent executor would replace (e.g.
+`ThreadPoolExecutor.map`) - `ExperimentRunner` itself would not need to
+change. The real constraint for later: a single `sqlite3.Connection`
+(`app.database.connection.Database`) is not thread-safe, so parallel
+execution would need one `Database`/connection per worker - already
+possible today since Phase 1 enabled WAL mode, which supports multiple
+connections to the same file.
+
+### Database additions (migration 3)
+
+Two new tables (`app/database/schema.py`), extending Phase 1/2's schema
+rather than replacing any of it:
+
+- `research_campaigns` - id, strategy_name, research_system, purpose,
+  configuration (JSON), status, experiment_count/completed_count/
+  failed_count, timestamps.
+- `research_experiments` - id, campaign_id (FK), research_system,
+  strategy_name/version, parameters/rule_configuration/
+  execution_configuration (JSON), data_identity, timeframe, data range,
+  parent_experiment_id (self-FK), status, fingerprint,
+  backtest_run_id (FK into Phase 2's `experiments` table),
+  result_fingerprint, duplicate_of_experiment_id (self-FK),
+  failure_info, timestamps.
+
+`research_experiments.fingerprint` is indexed but **not** unique -
+unlike `experiments.fingerprint` (Phase 2, genuinely one row per
+backtest run), multiple `research_experiments` rows are expected to
+share a fingerprint whenever deduplication kicks in (each duplicate gets
+its own identity/row, per the brief: "do not unnecessarily rerun it,
+reference the existing result" - it says reference, not "don't create a
+row").
+
+### Events and logging
+
+New `EventType` members (additive, `app/core/events.py`):
+`EXPERIMENT_CREATED`, `EXPERIMENT_FAILED`, `EXPERIMENT_SKIPPED_DUPLICATE`,
+`CAMPAIGN_CREATED`, `CAMPAIGN_STARTED`, `CAMPAIGN_COMPLETED` (Phase 1
+already had `EXPERIMENT_STARTED`/`EXPERIMENT_COMPLETED`, reused as-is).
+Logging uses the existing `LogCategory.EXPERIMENT` (per-experiment
+lifecycle) and `LogCategory.RESEARCH` (campaign-level) categories from
+Phase 1 - no new logging framework. Every log call carries `system=...`,
+`experiment_id=...`, and (where applicable) `campaign_id=...` via the
+`extra=` dict, matching the brief's example exactly.
+
+### Safety against overfitting (brief section 14)
+
+No system here picks a "best" configuration, and none is even capable of
+ranking results - `generate_experiments()` returns a plain list, and
+`ExperimentRunner`/`CampaignRunner` never compare one experiment's
+metrics to another's. Everything a future qualification system will need
+is already preserved per experiment: parameters, rule configuration,
+execution assumptions, data range, and (via `backtest_run_id`) the full
+`BacktestResult` - trades, equity curve, and every Phase 2 metric.
+
 ## Documented deviations from the Phase 1 brief's example tree
 
 - **`logs/` subfolders.** The brief's example tree lists
@@ -322,16 +535,22 @@ discovered and tracked as first-class rows.
 
 ## Future expansion points
 
-- **Five research systems** (`app/research/` + `app/systems/`): Parameter
-  Explorer, Rule/Logic Explorer, Risk/Execution Optimizer, Market-Condition
-  Tester, Adversarial/Research System. Each should call
-  `app/backtesting/run_backtest()` with a real `Strategy` and persist via
-  `app/backtesting/persistence.py`, plus `events` through the existing
-  `EventRecorder` - no schema change anticipated for the basic case.
-- **AI research layer** (`app/agents/`): reads `experiment_results`,
-  proposes new experiments, records via `ai_actions` +
-  `EventType.AI_INVOKED` / `AI_PATCH_CREATED`. Must never write to
-  `trades` or compute P&L - that stays in `app/backtesting/`.
+- **Strategy discovery/qualification** (`app/research/` - still an empty
+  placeholder; not the same thing as `app/systems/`, which now holds the
+  five research systems themselves, see "Phase 3" above): turning a
+  `Strategy` + a set of `ExperimentRecord`s into a qualification verdict
+  (robust / not robust, pass / fail out-of-sample, ...) and finally a row
+  in the `strategies` table. This is the "complete qualification system"
+  Phase 3 explicitly deferred (its brief section 14) - `app/systems/` was
+  built so nothing about it needs to change to support this: every
+  `ExperimentRecord` already carries parameters, rule/execution
+  configuration, data range, and a `backtest_run_id` pointing at the full
+  `BacktestResult`.
+- **AI research layer** (`app/agents/`): proposes new experiments by
+  constructing `ResearchRequest`s and submitting them to `CampaignRunner`
+  - never by calling `run_backtest()` or computing P&L directly - reads
+  `ExperimentRecord`/`BacktestResult` for its own analysis, records its
+  own actions via `ai_actions` + `EventType.AI_INVOKED` / `AI_PATCH_CREATED`.
 - **Supervisor Agent** (`app/supervisor/`): polls `system_status`, writes
   `supervisor_issues`, drives deterministic recovery first, AI-assisted
   diagnosis only after that fails, records via
