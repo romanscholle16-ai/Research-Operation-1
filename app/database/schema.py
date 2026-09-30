@@ -13,7 +13,7 @@ future phases can add tables/columns without breaking existing databases.
 
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 1
+CURRENT_SCHEMA_VERSION = 2
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -145,8 +145,20 @@ CREATE TABLE IF NOT EXISTS checkpoints (
 CREATE INDEX IF NOT EXISTS idx_checkpoints_component ON checkpoints(component);
 """
 
+_MIGRATION_2 = """
+ALTER TABLE experiments ADD COLUMN strategy_name TEXT;
+ALTER TABLE experiments ADD COLUMN fingerprint TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_experiments_fingerprint ON experiments(fingerprint);
+
+ALTER TABLE trades ADD COLUMN gross_pnl REAL;
+ALTER TABLE trades ADD COLUMN slippage_cost REAL;
+ALTER TABLE trades ADD COLUMN return_pct REAL;
+ALTER TABLE trades ADD COLUMN exit_reason TEXT;
+"""
+
 # Ordered list of (version, sql) migrations. Add new entries here in future
 # phases; never edit an already-released migration in place.
 MIGRATIONS: list[tuple[int, str]] = [
     (1, _MIGRATION_1),
+    (2, _MIGRATION_2),
 ]

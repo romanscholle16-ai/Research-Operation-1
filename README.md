@@ -3,7 +3,7 @@
 A local, autonomous trading-strategy research laboratory. Runs on Windows,
 Python 3.12+, entirely self-contained inside this project folder.
 
-**Current phase:** Phase 1 - Foundation, Architecture & Project State.
+**Current phase:** Phase 2 - Deterministic Backtesting Engine.
 See [CURRENT_TASK.md](CURRENT_TASK.md) for the active task,
 [PROJECT_STATE.md](PROJECT_STATE.md) for what exists today, and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how it fits together.
@@ -47,9 +47,10 @@ loop.
 ## Project layout
 
 ```
-app/            Application code (core, config, database, logging, state,
+app/            Application code: core, config, database, logging, state,
+                backtesting (deterministic engine - see ARCHITECTURE.md),
                 and placeholder packages for future phases: api, dashboard,
-                supervisor, research, backtesting, systems, agents)
+                supervisor, research, systems, agents
 data/           raw / processed / cache (databases, checkpoints) - git-ignored content
 strategies/     discovered / active / qualified / rejected - git-ignored content
 results/        experiments / reports - git-ignored content
