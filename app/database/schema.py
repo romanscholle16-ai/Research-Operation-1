@@ -13,7 +13,7 @@ future phases can add tables/columns without breaking existing databases.
 
 from __future__ import annotations
 
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 _MIGRATION_1 = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -252,6 +252,99 @@ CREATE TABLE IF NOT EXISTS ai_research_session_campaigns (
 CREATE INDEX IF NOT EXISTS idx_ai_research_session_campaigns_session ON ai_research_session_campaigns(session_id);
 """
 
+_MIGRATION_5 = """
+CREATE TABLE IF NOT EXISTS web_research_sessions (
+    id                          TEXT PRIMARY KEY,
+    objective                   TEXT NOT NULL,
+    status                      TEXT NOT NULL DEFAULT 'created',
+    iteration                   INTEGER NOT NULL DEFAULT 0,
+    max_iterations              INTEGER NOT NULL,
+    max_sources_per_session     INTEGER NOT NULL,
+    max_requests_per_session    INTEGER NOT NULL,
+    sources_discovered          INTEGER NOT NULL DEFAULT 0,
+    sources_retrieved           INTEGER NOT NULL DEFAULT 0,
+    evidence_count              INTEGER NOT NULL DEFAULT 0,
+    specification_count         INTEGER NOT NULL DEFAULT 0,
+    requests_made               INTEGER NOT NULL DEFAULT 0,
+    stopping_reason             TEXT,
+    final_specification_status  TEXT,
+    provider_name                TEXT,
+    model_name                    TEXT,
+    metadata                        TEXT,
+    created_at                        TEXT NOT NULL DEFAULT (datetime('now')),
+    started_at                        TEXT,
+    completed_at                      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_web_research_sessions_status ON web_research_sessions(status);
+
+CREATE TABLE IF NOT EXISTS web_sources (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES web_research_sessions(id),
+    url                 TEXT NOT NULL,
+    normalized_url      TEXT NOT NULL,
+    source_type         TEXT NOT NULL DEFAULT 'unknown',
+    status              TEXT NOT NULL,
+    title               TEXT,
+    domain              TEXT,
+    publisher           TEXT,
+    author              TEXT,
+    published_at        TEXT,
+    last_modified_at    TEXT,
+    retrieved_at        TEXT,
+    content_hash        TEXT,
+    content_type        TEXT,
+    byte_size           INTEGER,
+    http_status         INTEGER,
+    trust_metadata      TEXT,
+    discovery_query     TEXT,
+    failure_reason      TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_sources_session ON web_sources(session_id);
+CREATE INDEX IF NOT EXISTS idx_web_sources_normalized_url ON web_sources(normalized_url);
+
+CREATE TABLE IF NOT EXISTS web_evidence (
+    id                      TEXT PRIMARY KEY,
+    session_id              TEXT NOT NULL REFERENCES web_research_sessions(id),
+    source_id               TEXT NOT NULL REFERENCES web_sources(id),
+    claim                   TEXT NOT NULL,
+    status                  TEXT NOT NULL,
+    location_reference      TEXT,
+    quoted_text             TEXT,
+    extraction_timestamp    TEXT NOT NULL,
+    created_at              TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_evidence_session ON web_evidence(session_id);
+CREATE INDEX IF NOT EXISTS idx_web_evidence_source ON web_evidence(source_id);
+
+CREATE TABLE IF NOT EXISTS web_strategy_specifications (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES web_research_sessions(id),
+    name                TEXT NOT NULL,
+    status              TEXT NOT NULL,
+    specification       TEXT NOT NULL,
+    validation_errors   TEXT,
+    unknowns            TEXT,
+    ambiguities         TEXT,
+    source_evidence_ids TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_strategy_specifications_session ON web_strategy_specifications(session_id);
+
+CREATE TABLE IF NOT EXISTS web_research_decisions (
+    id                  TEXT PRIMARY KEY,
+    session_id          TEXT NOT NULL REFERENCES web_research_sessions(id),
+    iteration           INTEGER NOT NULL,
+    action              TEXT NOT NULL,
+    reasoning_summary   TEXT,
+    details             TEXT,
+    stopping_reason     TEXT,
+    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_web_research_decisions_session ON web_research_decisions(session_id);
+"""
+
 # Ordered list of (version, sql) migrations. Add new entries here in future
 # phases; never edit an already-released migration in place.
 MIGRATIONS: list[tuple[int, str]] = [
@@ -259,4 +352,5 @@ MIGRATIONS: list[tuple[int, str]] = [
     (2, _MIGRATION_2),
     (3, _MIGRATION_3),
     (4, _MIGRATION_4),
+    (5, _MIGRATION_5),
 ]

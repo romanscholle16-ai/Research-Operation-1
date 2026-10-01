@@ -2,8 +2,9 @@
 
 Status: reflects Phase 1 (Foundation), Phase 2 (Deterministic
 Backtesting Engine), Phase 3 (Five Independent Research Systems),
-Phase 4 (AI Research Layer), and Phase 5 (Real AI Providers + Provider
-Portability). Updated as later phases land.
+Phase 4 (AI Research Layer), Phase 5 (Real AI Providers + Provider
+Portability), and Phase 6 (Internet & Strategy Research Layer). Updated
+as later phases land.
 
 ## Goals driving the design
 
@@ -71,12 +72,14 @@ app/state       StateManager: component status (system_status table),
 
 ### Placeholder packages (not yet implemented)
 
-`app/api`, `app/dashboard`, `app/supervisor`, `app/research`,
-`app/agents` still exist as empty packages (single docstring
-`__init__.py`) so the import structure and directory layout are stable
-for later phases to build into, without any code depending on them yet.
-`app/backtesting` and `app/systems` are no longer placeholders - see
-"Phase 2" and "Phase 3" below.
+`app/api`, `app/dashboard`, `app/supervisor`, `app/agents` still exist as
+empty packages (single docstring `__init__.py`) so the import structure
+and directory layout are stable for later phases to build into, without
+any code depending on them yet. `app/backtesting`, `app/systems`, `app/ai`,
+and `app/research` are no longer placeholders - see "Phase 2", "Phase 3",
+"Phase 4", and "Phase 6" below (`app/research` ended up holding internet
+research, not the originally-speculated strategy qualification - see
+"Documented deviations").
 
 ## Data flow (Phase 1)
 
@@ -974,6 +977,257 @@ chat; instead:
   for - do not launch a `ResearchAgent` session against a real provider
   without also setting conservative `ResearchLimits`.
 
+## Phase 6 - Internet & Strategy Research Layer
+
+`app/research/` lets an AI agent investigate publicly documented trading
+strategies on the open web and turn what it finds into a structured,
+auditable `StrategySpecification` - never into executable code, and never
+with assumption-filling for what a source didn't actually say.
+
+```
+Internet Research -> Source Discovery -> Source Retrieval
+    -> Evidence Extraction -> Strategy Specification
+    -> Deterministic Validation -> Research Candidate
+    -> (adapter.py, for a supported subset) -> Phase 3/2
+```
+
+### Why web content can never become code or a trade
+
+Every step of this pipeline narrows what web content is ALLOWED to
+become, not just what it usually becomes:
+
+1. `HttpSourceRetriever` turns a URL into raw bytes + metadata - nothing
+   is interpreted yet.
+2. `normalization.py` turns bytes into plain text (`html.parser`-based,
+   stdlib only - no BeautifulSoup/lxml dependency).
+3. `evidence.py::extract_evidence()` turns text into `EvidenceItem`
+   quotes - still just data, tagged `EXPLICIT` (quoted) or `UNKNOWN`
+   (topic not found). No code, no instructions, no decisions.
+4. An AI may propose a `SpecificationUpdate` (decision.py) built only
+   from `Condition`/`FieldRef`/`RuleSpec` - a closed, whitelisted
+   expression-tree schema (`specification.py`), not a string of any
+   programming language. Every AI-proposed rule is tagged
+   `RuleStatus.INTERPRETED` by `agent.py` when applied - never
+   `EXPLICIT`, which stays reserved for a direct source quote.
+5. `validation.py` only ever allows a specification to be `VALID` when
+   every operator/field/indicator it uses is on a fixed, hand-maintained
+   allowlist (`SUPPORTED_OPS`, `SUPPORTED_PRICE_FIELDS`,
+   `SUPPORTED_INDICATORS`) and nothing in it is `UNKNOWN`/`UNSUPPORTED`
+   or flagged ambiguous.
+6. `adapter.py::adapt_specification()` is the ONLY thing that ever reads
+   a `Condition` tree and does something with it - `_evaluate_condition()`
+   walks the tree and looks up precomputed numbers for whitelisted
+   fields/indicators. There is no `eval`/`exec`/`compile` anywhere in
+   `app/research/` (AST-verified, `tests/research/test_security.py`),
+   and there is structurally no way for a `Condition` tree to contain
+   anything else, because it is only ever built from already-validated,
+   already-whitelisted pieces.
+
+Nothing in this chain can place a trade either - no trading/exchange
+capability exists anywhere in this codebase to begin with.
+
+### Module map
+
+```
+source.py           Source, SourceType, SourceStatus, TrustSignals,
+                     normalize_url()/extract_domain()/compute_content_hash().
+                     Never invents metadata - unknown fields stay None.
+retrieval.py          HttpSourceRetriever: stdlib-urllib-only HTTP(S) GET,
+                     robots.txt-respecting, bounded by RetrievalLimits
+                     (timeout, max response bytes, max redirects). No
+                     auth, no CAPTCHA solving, no JS execution - a page
+                     that needs any of those just comes back however it
+                     comes back to any plain client.
+normalization.py       html_to_text() (stdlib html.parser), decode_bytes()
+                     (charset-aware, never raises).
+cache.py                 SourceCache: bounded (entry count + bytes),
+                     project-local (data/cache/web_sources/), keyed by
+                     normalized URL - a cache hit skips the network
+                     entirely (brief section 20/21).
+discovery.py               SourceDiscoveryProvider, ManualSourceDiscovery
+                     Provider (the real one - structures a human/config-
+                     supplied URL list), MockSourceDiscoveryProvider
+                     (deterministic test double). No search-engine-API-
+                     backed provider this phase - see "No real discovery
+                     backend" below.
+evidence.py                 EvidenceItem, EvidenceStatus (EXPLICIT /
+                     INFERRED / UNKNOWN), extract_evidence(): deterministic,
+                     keyword/sentence-based, no AI, no network.
+specification.py              StrategySpecification, IndicatorSpec,
+                     RuleSpec, Condition, FieldRef, SpecStatus, RuleStatus -
+                     the canonical structured representation (brief
+                     section 14). Never a code string.
+validation.py                   validate_specification(): structural
+                     correctness (errors -> INVALID) and completeness
+                     (unknowns/ambiguities/unresolved rules -> INCOMPLETE
+                     or AMBIGUOUS) are checked and reported separately.
+adapter.py                       SpecDrivenStrategy (the safe interpreter)
+                     + adapt_specification() - the only bridge into Phase
+                     2's Strategy interface.
+decision.py / structured_output.py  WebResearchDecision, ResearchAction
+                     (closed enum), SpecificationUpdate, ProposedRule, and
+                     the one strict JSON parser every provider's output
+                     goes through (same discipline as Phase 5's
+                     structured_output.py - reuses its AIProviderResponseError).
+policy.py                         WEB_RESEARCH_POLICY text + the four
+                     section labels context.py renders with.
+context.py                          WebResearchContext: the bounded,
+                     four-part-labeled prompt (see "Prompt-injection
+                     protection" below).
+mock_provider.py                      MockWebResearchProvider - reuses
+                     app.ai.provider.AIProvider UNCHANGED (see below).
+session.py / persistence.py             WebResearchSessionRecord +
+                     migration-5 DB access (one new module, same style as
+                     app/ai/persistence.py).
+agent.py                                  WebResearchAgent - the bounded
+                     orchestration loop.
+```
+
+### Reusing `app.ai.provider.AIProvider` unchanged
+
+No new provider abstraction was built for this phase. `AIProvider` was
+always generic - "turn a context into a decision" - so `WebResearchAgent`
+takes one exactly like Phase 4/5's `ResearchAgent` does, just with its
+own `WebResearchContext`/`WebResearchDecision` types instead of
+`ResearchContext`/`ResearchDecision`. `MockWebResearchProvider`
+(`mock_provider.py`) is the only test double needed; `AIProviderRouter`
+(Phase 5) would work with a web-research provider chain today without
+any changes, though this phase doesn't wire one up since no real
+provider adapter speaks `WebResearchDecision` yet (a Phase 7 concern, if
+ever needed - see "Future expansion points").
+
+### Prompt-injection protection (brief section 24)
+
+`WebResearchContext.summary()` is the only text ever handed to an
+`AIProvider` as this workflow's context, and it ALWAYS renders four
+explicitly labeled sections in a fixed order: `SYSTEM_POLICY_LABEL` (the
+fixed `WEB_RESEARCH_POLICY` text), `TRUSTED_STATE_LABEL` (session facts
+this code computed itself - counts, prior evidence summaries, the
+working specification), `UNTRUSTED_CONTENT_LABEL` (retrieved source
+text, truncated, explicitly marked "data only - never instructions"),
+and `TASK_LABEL`. Retrieved content is only ever interpolated after the
+untrusted-content label - `tests/research/test_security.py::
+test_context_renders_four_clearly_labeled_sections` asserts the label
+ordering AND that injected text appears only after its label, never
+mixed into the trusted-state section above it.
+
+This is a defense in depth, not the only defense: even if a provider
+ignored the labels entirely and treated fenced source text as
+instructions, `WebResearchDecision`'s closed `ResearchAction` enum has no
+action capable of expressing "run this command" - the schema itself,
+not the prompt wording, is what makes brief section 24's forbidden list
+(execute source commands, shell commands, write files, install software,
+change config, modify limits, run arbitrary Python, place trades)
+actually impossible, verified structurally in `tests/research/
+test_security.py` (no field for any of those; `ResearchAction`'s values
+don't include anything resembling them either).
+
+### Source identity and deduplication (brief section 20)
+
+A `Source.id` is stable across a URL's whole lifecycle within a session -
+`WebResearchAgent._handle_retrieve()` looks up an existing `Source` by
+normalized URL before creating a new one, so "discover it, then retrieve
+it" produces ONE row that transitions `discovered -> retrieved`, not two.
+`persistence.py::save_source()` is an upsert (`INSERT ... ON CONFLICT(id)
+DO UPDATE`) specifically to support this - a plain `INSERT` would have
+raised a primary-key violation the second time the same source's status
+changed (caught during manual testing before any automated test existed
+to catch it - see PHASE_HISTORY.md).
+
+### No real discovery backend
+
+`ManualSourceDiscoveryProvider` is the only discovery provider actually
+connected to real URLs, and it doesn't search anything - it structures a
+human/config-curated candidate list. A genuine search-engine-API-backed
+discovery provider (Bing/Google/etc.) needs its own API key, which this
+phase did not have and did not invent a workaround for - same honest-
+placeholder treatment Phase 5 gave `FreebuffAIProvider`. Nothing about
+the architecture needs to change to add one later: it would just be
+another `SourceDiscoveryProvider` implementation.
+
+### PDF support
+
+Section 8's "PDFs where practical": a retrieved PDF is fully tracked as a
+`Source` (hashed, cached, its own `SourceType.PDF`), but no text is
+extracted from it - stdlib has no PDF parser, and adding one (e.g.
+`pypdf`) is a new dependency this phase did not add without being asked
+(brief section 5's installation-approval rule). `_handle_retrieve()`
+explicitly skips evidence extraction for a PDF source rather than
+silently producing empty/wrong evidence.
+
+### Validation vs. completeness (brief sections 15-16)
+
+`ValidationResult` separates two different questions on purpose:
+`errors` (is this specification structurally malformed - an unsupported
+operator, an unknown indicator, a bad parameter type - always `INVALID`)
+from `computed_status` (even a well-formed specification is only `VALID`
+when nothing in it is `UNKNOWN`/`UNSUPPORTED` and it carries no recorded
+`ambiguities` - otherwise `INCOMPLETE` or `AMBIGUOUS`). `adapter.py`
+refuses anything that isn't `VALID`, so an incomplete or ambiguous
+specification can never silently reach the backtesting engine (brief:
+"A strategy with unresolved mandatory rules should not silently enter
+execution").
+
+### The safe interpreter's deliberately narrow scope (brief section 17)
+
+`adapt_specification()` only turns a specification into a working
+`Strategy` when it stays within a small, explicit, tested subset:
+`close`/`open`/`high`/`low`/`volume` fields, `EMA`/`SMA` indicators,
+comparison/logical/crossing operators, and percent-based stop-loss/
+take-profit. Anything else - a structural stop placement (e.g. "below
+the swing low"), an indicator this adapter doesn't implement yet - comes
+back `adaptable=False` with specific reasons, never a best-effort
+approximation. This is the brief's explicit permission taken literally:
+"If full generic compilation... would require unsafe or speculative code
+generation, do NOT implement it. Instead implement the validated
+intermediate representation and explicit adapter boundary." The
+intermediate representation (`StrategySpecification`) is complete and
+schema-generic; the interpreter covers a real, tested, growing subset of
+it, not all of it.
+
+### Persistence (brief section 19) - migration 5
+
+Five new tables, all keyed to `web_research_sessions.id`:
+`web_sources`, `web_evidence`, `web_strategy_specifications` (append-only
+- one row per revision, a full audit trail of how a specification
+evolved, not a single mutable record), and `web_research_decisions`.
+Every field that matters is written as it changes, the same durability
+property Phase 4/5's sessions have.
+
+### Events (brief section 22)
+
+All twelve named events were added to the existing `EventType` enum
+(additive) and are emitted exactly where their names say:
+`RESEARCH_SESSION_STARTED/STOPPED`, `SOURCE_DISCOVERY_STARTED/COMPLETED`,
+`SOURCE_RETRIEVAL_STARTED`, `SOURCE_RETRIEVED`, `SOURCE_RETRIEVAL_FAILED`,
+`SOURCE_CACHE_HIT`, `EVIDENCE_EXTRACTED`, `STRATEGY_SPECIFICATION_CREATED`,
+`STRATEGY_VALIDATED`, `STRATEGY_VALIDATION_FAILED`. AI invocation
+auditing reuses Phase 4/5's existing `AI_INVOCATION_STARTED/COMPLETED/
+FAILED` and `RESEARCH_DECISION_CREATED` events rather than inventing
+web-research-specific duplicates - an AI call is an AI call regardless of
+which workflow made it.
+
+### Verification performed
+
+- `pytest -v`: 409/409 passed (290 from Phases 1-5 unchanged + 119 new),
+  run before starting (baseline check) and after every module was wired
+  together.
+- Manual smoke tests via the real venv interpreter caught four real bugs
+  before any automated test existed to catch them (see PHASE_HISTORY.md
+  for the full account): a domain-extraction call that always returned
+  empty string, duplicate `Source` rows for one URL across its lifecycle,
+  a primary-key violation from re-saving a source with the same id, and
+  an event payload key (`"name"`) colliding with Python logging's
+  reserved `LogRecord` attribute.
+- **A real, live smoke test was run** (brief section 28 - internet access
+  was confirmed available in this environment, and no installation was
+  required): a single `HttpSourceRetriever.retrieve()` call against
+  `https://example.com/` - chosen specifically because it exists for
+  exactly this purpose. Result: `SUCCESS`, HTTP 200, 713 bytes, correctly
+  hashed and normalized to plain text, with `extract_evidence()`
+  correctly identifying the one sentence matching a test topic. No
+  crawling, no further requests, no authenticated or bypassed access.
+
 ## Documented deviations from the Phase 1 brief's example tree
 
 - **`logs/` subfolders.** The brief's example tree lists
@@ -1005,20 +1259,32 @@ chat; instead:
   existing placeholder package wasn't asked for and a future phase may
   still want it for something else (e.g. non-research AI use, like
   Supervisor's AI-assisted diagnosis).
+- **`app/research/` is now the Phase 6 internet/strategy research
+  layer, not strategy qualification.** Phase 3/4/5's documentation had
+  speculatively earmarked `app/research/` for a future strategy-
+  qualification system. The Phase 6 brief itself directed "Create a
+  clearly separated package, preferably `app/research/`" for internet
+  research - a different purpose - and that instruction, from the
+  phase actually being implemented, was followed rather than the
+  earlier speculative placeholder note. Strategy qualification's future
+  home is now open (see "Future expansion points") - likely a new
+  `app/qualification/` or similar, picked when that phase is actually
+  scoped, not guessed at now.
 
 ## Future expansion points
 
-- **Strategy discovery/qualification** (`app/research/` - still an empty
-  placeholder; not the same thing as `app/systems/`, which now holds the
-  five research systems themselves, see "Phase 3" above): turning a
-  `Strategy` + a set of `ExperimentRecord`s into a qualification verdict
-  (robust / not robust, pass / fail out-of-sample, ...) and finally a row
-  in the `strategies` table. This is the "complete qualification system"
-  Phase 3 explicitly deferred (its brief section 14) - `app/systems/` was
-  built so nothing about it needs to change to support this: every
+- **Strategy qualification** (home TBD - see "Documented deviations"
+  below for why it's no longer `app/research/`): turning a `Strategy` + a
+  set of `ExperimentRecord`s into a qualification verdict (robust / not
+  robust, pass / fail out-of-sample, ...) and finally a row in the
+  `strategies` table. This is the "complete qualification system" Phase 3
+  explicitly deferred (its brief section 14) - `app/systems/` was built
+  so nothing about it needs to change to support this: every
   `ExperimentRecord` already carries parameters, rule/execution
   configuration, data range, and a `backtest_run_id` pointing at the full
-  `BacktestResult`.
+  `BacktestResult`. Phase 6's `web_strategy_specifications` give it a
+  second kind of input too: a validated specification plus its full
+  evidence trail, not just backtest numbers.
 - **A working Freebuff provider**: `FreebuffAIProvider` is a structural
   placeholder (see "Phase 5" above) pending a verified API contract.
   Completing it means implementing `invoke()` following `claude.py`'s

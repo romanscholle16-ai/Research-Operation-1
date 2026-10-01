@@ -3,7 +3,7 @@
 A local, autonomous trading-strategy research laboratory. Runs on Windows,
 Python 3.12+, entirely self-contained inside this project folder.
 
-**Current phase:** Phase 5 - Real AI Providers + Provider Portability.
+**Current phase:** Phase 6 - Internet & Strategy Research Layer.
 See [CURRENT_TASK.md](CURRENT_TASK.md) for the active task,
 [PROJECT_STATE.md](PROJECT_STATE.md) for what exists today, and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how it fits together.
@@ -51,6 +51,20 @@ and why. No AI provider ever calculates financial results or bypasses
 `CampaignRunner` - see `app/ai/policy.py` and ARCHITECTURE.md's safety
 sections.
 
+## Internet research
+
+`app/research/` lets an AI agent discover and retrieve publicly
+documented trading strategies and turn them into a structured,
+auditable `StrategySpecification` - never into executable code. Source
+retrieval is plain HTTP(S) only (stdlib `urllib`), respects
+`robots.txt`, and never bypasses auth/paywalls/CAPTCHAs. Only a narrow,
+explicitly-validated subset of a specification (EMA/SMA comparisons,
+percent stop/target) can become a real, runnable strategy via
+`app/research/adapter.py`'s safe interpreter - everything else is
+reported as `INCOMPLETE`/`AMBIGUOUS`/`UNSUPPORTED`, never guessed at.
+See ARCHITECTURE.md "Phase 6" for the full design and its safety
+boundaries.
+
 ## Testing
 
 ```powershell
@@ -62,9 +76,10 @@ sections.
 ```
 app/            Application code: core, config, database, logging, state,
                 backtesting (deterministic engine), systems (five research
-                systems), ai (AI research layer - see ARCHITECTURE.md),
-                and placeholder packages for future phases: api, dashboard,
-                supervisor, research, agents
+                systems), ai (AI research layer), research (internet &
+                strategy research layer - see ARCHITECTURE.md), and
+                placeholder packages for future phases: api, dashboard,
+                supervisor, agents
 data/           raw / processed / cache (databases, checkpoints) - git-ignored content
 strategies/     discovered / active / qualified / rejected - git-ignored content
 results/        experiments / reports - git-ignored content

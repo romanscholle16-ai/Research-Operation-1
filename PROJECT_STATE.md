@@ -1,8 +1,8 @@
 # Project State
 
-**Active phase:** Phase 5 - Real AI Providers + Provider Portability
+**Active phase:** Phase 6 - Internet & Strategy Research Layer
 **Status:** Complete
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-01
 
 This file is written for another AI (or human) with no access to prior
 conversation history. It describes what actually exists and has been
@@ -171,25 +171,70 @@ phases.
   real network calls or credentials used; one real-but-expected-to-fail
   call against the confirmed-absent local Ollama server.
 
+- An internet & strategy research layer (`app/research/`, 15 modules):
+  deterministic source retrieval (`HttpSourceRetriever` - stdlib
+  `urllib`, robots.txt-respecting, bounded timeout/response-size/
+  redirects, no auth/CAPTCHA/paywall bypass of any kind), a bounded
+  project-local source cache, deterministic keyword-based evidence
+  extraction (`EXPLICIT`/`UNKNOWN`, source-traceable), a canonical
+  `StrategySpecification` (indicators/entry/exit/stop/target rules as a
+  structural `Condition`/`FieldRef` expression tree - never a code
+  string), deterministic validation (`VALID`/`INCOMPLETE`/`AMBIGUOUS`/
+  `INVALID`), and a safe, fixed-grammar interpreter (`adapter.py`) that
+  turns a narrow, well-defined subset of validated specifications
+  (close/open/high/low/volume + EMA/SMA, comparison/logical/crossing
+  operators, percent-based stop/target) into a real `Strategy` Phase 3
+  can experiment with - proven by actually running one through
+  `run_backtest()`, not just asserting it should work. A
+  `WebResearchAgent` runs the bounded discover -> retrieve -> extract ->
+  specify -> validate workflow, reusing Phase 4/5's `AIProvider`
+  interface unchanged (no new provider abstraction needed). Source
+  discovery has one real, honest implementation
+  (`ManualSourceDiscoveryProvider` - structures a human-curated URL list;
+  no search-engine-API-backed provider, since none was available without
+  new credentials, same treatment as Phase 5's Freebuff). Persisted into
+  five new tables (schema migration 5). See ARCHITECTURE.md "Phase 6 -
+  Internet & Strategy Research Layer" for the full design, including the
+  prompt-injection containment (four explicitly labeled context
+  sections) and four real bugs caught and fixed during development.
+- 119 new automated tests (`tests/research/`, 409 total with Phases 1-5),
+  all passing: retrieval (success, timeout, HTTP/network errors,
+  oversized response, robots.txt, unsupported/dangerous URL schemes),
+  normalization, bounded caching, discovery, evidence extraction and
+  traceability, specification validation (all four statuses), the safe
+  adapter/interpreter (including running an adapted strategy through the
+  real backtesting engine), structured-output parsing, persistence, the
+  full agent loop (all three limits, provider failure, retrieval
+  failure, cache hits, source-identity deduplication), security (AST-
+  verified no eval/exec/subprocess/`run_backtest` import; malicious
+  "ignore previous instructions" source text proven inert), and an
+  end-to-end integration test. Entirely offline/mocked-HTTP except for
+  one tiny, explicitly-reported live smoke test against
+  `https://example.com/` (internet access was available in this
+  environment; a single GET, no crawling).
+
 ## What has been completed
 
 Phase 1 (all 15 requirements), Phase 2 (all 24 requirements), Phase 3
-(all 21 requirements), Phase 4 (all 26 requirements), and Phase 5 (all
-31 requirements) from their respective briefs: see PHASE_HISTORY.md for
-what each phase built and why.
+(all 21 requirements), Phase 4 (all 26 requirements), Phase 5 (all 31
+requirements), and Phase 6 (all 34 requirements) from their respective
+briefs: see PHASE_HISTORY.md for what each phase built and why.
 
-## What remains (explicitly out of Phase 5 scope)
+## What remains (explicitly out of Phase 6 scope)
 
-- Actual trading strategies (only mock/scripted ones exist, solely to
-  validate the engine and research systems), a working Freebuff
-  integration (no verified API contract yet), real-provider smoke
-  testing (no credentials were available), a running local model server
-  to test `OllamaAIProvider` against, browser automation, autonomous
-  strategy discovery, strategy qualification, live trading / exchange
-  execution, the full dashboard, the Supervisor Agent, a 24/7 autonomous
-  loop, Monte Carlo, sophisticated regime detection, distributed
-  workers, and large historical data downloads. See CURRENT_TASK.md and
-  ARCHITECTURE.md's "Future expansion points".
+- Actual trading strategies (only mock/scripted/web-derived test ones
+  exist), a working Freebuff AI provider integration (no verified API
+  contract yet), real AI-provider smoke testing (no credentials were
+  available), a running local model server to test `OllamaAIProvider`
+  against, a real search-engine-backed source discovery provider (no API
+  key available), PDF text extraction (would need a new dependency, not
+  added without being asked), autonomous strategy discovery, strategy
+  qualification, live trading / exchange execution, the full dashboard,
+  the Supervisor Agent, a 24/7 autonomous loop, Monte Carlo,
+  sophisticated regime detection, distributed workers, large-scale web
+  crawling, and automatic code generation/deployment from a strategy
+  specification. See CURRENT_TASK.md and ARCHITECTURE.md's "Future
+  expansion points".
 
 ## Important technical state
 
@@ -234,14 +279,25 @@ what each phase built and why.
   the backtesting engine - none of them are wired into `Application`'s
   lifecycle or any CLI/scheduler yet.
   `strategies` table is still unpopulated; experiments (Phase 3) and
-  research sessions (Phase 4) both record `strategy_name`/
-  `strategy_version` as plain strings, not a `strategies` row - see
-  ARCHITECTURE.md "Future expansion points" for why that's deferred to
-  strategy discovery/qualification.
-- Database schema is still at version 4 - Phase 5 added no tables
-  (provider/router state is entirely in-process; AI invocation audit
-  logging reuses Phase 1's `ai_actions` table unchanged, just with more
-  metadata keys).
-- `pyproject.toml` is unchanged by Phase 5 - both real provider adapters
-  use stdlib `urllib.request`, not the `anthropic` package or any Ollama
-  client library (see ARCHITECTURE.md "Phase 5 - No new dependency").
+  research sessions (Phase 4/6) both record `strategy_name`/
+  `strategy_version` (or a specification's own `name`) as plain strings,
+  not a `strategies` row - strategy qualification remains deferred (see
+  ARCHITECTURE.md "Future expansion points" - its planned home is no
+  longer `app/research/`, which Phase 6 took for internet research; see
+  "Documented deviations").
+- Database schema is now at version 5 (`app/database/schema.py`):
+  migration 5 added `web_research_sessions`, `web_sources`,
+  `web_evidence`, `web_strategy_specifications` (append-only - one row
+  per revision), and `web_research_decisions`. Migrations remain
+  additive/idempotent.
+- `pyproject.toml` is still unchanged (since Phase 4) - Phase 6's HTTP
+  retrieval, HTML normalization, and robots.txt handling are all stdlib
+  (`urllib`, `html.parser`), no new dependency.
+- `app/research/` is now the Phase 6 internet-research layer, NOT an
+  empty placeholder for strategy qualification as earlier phases'
+  documentation had speculated - see ARCHITECTURE.md "Documented
+  deviations" for why that changed and where qualification's future home
+  moved to instead.
+- `WebResearchAgent` is invoked directly from Python, same as every
+  other agent/runner in this project - not wired into `Application`'s
+  lifecycle or a CLI/scheduler.

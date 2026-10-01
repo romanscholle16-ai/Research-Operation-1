@@ -539,3 +539,152 @@ against an actual running Ollama server (none installed). `main.py`/
 `Application` still do not construct or use a `ResearchAgent`/provider
 of any kind - that wiring remains open for whichever future phase
 actually needs the AI layer to run as part of the application lifecycle.
+
+## Phase 6 - Internet & Strategy Research Layer
+
+**Completed:** 2026-10-01
+**Status:** Complete
+
+### Starting point
+
+Phase 1-5 baseline (290 tests) re-verified green before any change.
+`app/research/` did not exist yet as real code - Phase 3-5's
+documentation had speculatively earmarked it (empty) for a future
+strategy-qualification system; see "Key decisions" for why that
+assumption didn't survive contact with this phase's actual brief.
+
+### What was built
+
+A controlled internet research layer (`app/research/`, 15 modules, 119
+new tests in `tests/research/`) implementing: Source Discovery ->
+Source Retrieval -> Evidence Extraction -> Strategy Specification ->
+Deterministic Validation -> (for a safe, narrow subset) a real
+`Strategy`. Deterministic, stdlib-only HTTP retrieval
+(`HttpSourceRetriever`) respecting `robots.txt` and bounded by timeout/
+response-size/redirect/request-count limits a human sets and the AI
+cannot change; a bounded project-local cache; deterministic keyword-
+based evidence extraction with full source traceability; a canonical,
+structural `StrategySpecification` (a `Condition`/`FieldRef` expression
+tree, never a code string); a validator that separates structural
+correctness from completeness; a safe, fixed-grammar interpreter
+(`adapter.py`) covering a deliberately narrow subset (EMA/SMA
+comparisons, percent stop/target) that produces a real, tested `Strategy`
+Phase 2's engine can run; and a `WebResearchAgent` running the bounded
+workflow, reusing Phase 4/5's `AIProvider` interface completely
+unchanged. Five new database tables (migration 5), twelve new
+`EventType` members. Full design writeup: ARCHITECTURE.md "Phase 6 -
+Internet & Strategy Research Layer".
+
+### Key decisions
+
+- **`app/research/` became the internet research layer, overriding
+  earlier phases' speculative documentation that it would be strategy
+  qualification.** The Phase 6 brief explicitly said "Create a clearly
+  separated package, preferably `app/research/`" - an instruction from
+  the phase actually being built beats a guess three phases old about
+  what that path would eventually hold. Strategy qualification's home is
+  now open again, to be named when that phase is actually scoped (see
+  ARCHITECTURE.md "Documented deviations").
+- **No AI-authored string of code, ever - a `Condition`/`FieldRef`
+  expression tree instead**, interpreted by a small, hand-written,
+  fully-tested evaluator (`adapter.py::_evaluate_condition`) over a
+  whitelisted set of fields/indicators/operators. This is what brief
+  section 30 ("no generic code generation") and section 2's "web page ->
+  Python code" prohibition look like structurally: there is no `eval`/
+  `exec`/`compile` anywhere in the package (AST-verified), and a
+  `Condition` tree cannot contain anything outside the whitelist because
+  `validation.py` rejects it before `adapter.py` ever sees it.
+- **Every AI-proposed rule is tagged `RuleStatus.INTERPRETED`, never
+  `EXPLICIT`, by construction** - `agent.py`'s `_handle_update_specification`
+  hardcodes this regardless of what the AI claims. `EXPLICIT` is reserved
+  for a direct source quote (`evidence.py`), and Phase 6 does not attempt
+  to deterministically map a quote onto a structural rule - that
+  remains a documented limitation, not a hidden one (brief section 15's
+  "no assumption filling" taken seriously: better to under-claim than to
+  mislabel an interpretation as a documented fact).
+- **No real source-discovery backend** (no Bing/Google/etc. API key
+  available) **and no working Freebuff-style guess at one** -
+  `ManualSourceDiscoveryProvider` structures a human-curated URL list
+  instead, which is honestly what it is: not search, just organization.
+  Same treatment Phase 5 gave `FreebuffAIProvider` for the same reason
+  (brief section 7's explicit instruction not to improvise against an
+  unverified contract, applied here to discovery section 11 by the same
+  logic).
+- **PDF content is tracked (hashed, cached, its own `SourceType`) but
+  never text-extracted** - stdlib has no PDF parser, and adding one
+  (e.g. `pypdf`) is a dependency this phase did not add without being
+  asked (brief section 5). Silently producing empty/wrong evidence from
+  an unparsed PDF would be worse than honestly skipping it.
+- **One `Source.id` per URL across its whole lifecycle, enforced by an
+  upsert, not a plain insert.** `WebResearchAgent._handle_retrieve()`
+  looks up an existing `Source` by normalized URL before creating a new
+  one, and `persistence.py::save_source()` is `INSERT ... ON CONFLICT(id)
+  DO UPDATE` specifically because a second plain `INSERT` with the same
+  primary key would raise. Both halves of this fix were caught by manual
+  testing, not written defensively up front - see "Verification
+  performed".
+- **Context sent to any AI provider always renders four explicitly
+  labeled sections, system policy -> trusted state -> untrusted source
+  content -> task, in that fixed order** (brief section 24). This is
+  belt-and-suspenders with the real protection, which is structural:
+  `WebResearchDecision`'s closed `ResearchAction` enum has no action that
+  could execute anything a source said, regardless of whether a provider
+  respects the labels.
+
+### Verification performed
+
+- `pytest -v`: 409/409 passed (290 from Phases 1-5 unchanged + 119 new),
+  run before starting (baseline check) and after every module was wired
+  together.
+- Four real bugs were caught by manual end-to-end smoke testing before
+  any automated test existed to catch them (same discipline as every
+  prior phase's "catch it by hand first" habit):
+  1. `Source(url=url).domain` was used as a shortcut to extract a URL's
+     domain - but `Source.domain` is a plain field with no auto-derivation,
+     so this always silently returned `""`. Fixed with a real
+     `extract_domain()` helper, computed once and threaded through.
+  2. Retrieving a URL that had already been discovered created a SECOND
+     `Source` row for the same URL instead of transitioning the existing
+     one's status - violating the "one source identity per URL" model
+     the brief's deduplication section asks for. Fixed by looking up an
+     existing source by normalized URL first and reusing its id.
+  3. That fix then surfaced a second bug: re-saving a source with the
+     same id crashed with a SQLite primary-key violation, because
+     `save_source()` was a plain `INSERT`. Fixed by making it an upsert.
+  4. An event payload used `"name"` as a key
+     (`payload={"name": updated_spec.name, ...}`), which collided with
+     Python's `logging` module reserving `name` as a `LogRecord`
+     attribute, raising `KeyError: Attempt to overwrite 'name' in
+     LogRecord` the first time `UPDATE_SPECIFICATION` actually ran.
+     Renamed to `"strategy_name"`. (Grepped the rest of the codebase
+     afterward - no other event payload uses a reserved `LogRecord` key.)
+  Two of the first draft's own *tests* were also wrong, not the code:
+  `normalize_url()` correctly preserves path case (paths are
+  case-sensitive on real servers; only scheme/host were ever meant to be
+  lowercased) while a test assumed path lowercasing too; and an
+  AST-based "no eval/exec/compile" security test initially flagged
+  `re.compile(...)` - a safe, unrelated stdlib call - because it matched
+  on attribute name alone rather than restricting to bare builtin calls.
+- **A real, live smoke test was run** (brief section 28): internet
+  access was confirmed reachable in this environment before writing any
+  retrieval code (`curl` to `example.com` returned HTTP 200), so one
+  real `HttpSourceRetriever.retrieve("https://example.com/")` call was
+  made outside the automated suite - chosen because that domain exists
+  specifically for this purpose. Result: success, HTTP 200, 713 bytes,
+  correctly hashed, normalized, and evidence-extracted. No crawling, no
+  further requests.
+
+### Deferred to later phases
+
+Everything in the Phase 6 brief's "DO NOT IMPLEMENT YET" section:
+professional dashboard, Windows `.exe`, Supervisor Agent, 24/7 autonomous
+operation, live trading, exchange APIs, autonomous unlimited strategy
+discovery, strategy qualification, Monte Carlo, ML regime detection,
+distributed workers, large-scale web crawling, and automatic code
+generation/deployment from a strategy specification. Also not built
+(future scope, explicitly flagged rather than faked): a real search-
+engine-backed source discovery provider, PDF text extraction, a working
+Freebuff AI provider and a real AI-provider/Ollama-server smoke test
+(carried over from Phase 5, still blocked on the same missing
+credentials/server), and wiring `WebResearchAgent` into `Application`'s
+lifecycle or a CLI.

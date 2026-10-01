@@ -1,76 +1,88 @@
 # Current Task
 
-**Phase 5 - Real AI Providers + Provider Portability: COMPLETE.**
+**Phase 6 - Internet & Strategy Research Layer: COMPLETE.**
 
-No task is currently in progress. Per the Phase 5 brief, work stopped
-after the phase completion report; Phase 6 has not been started and its
+No task is currently in progress. Per the Phase 6 brief, work stopped
+after the phase completion report; Phase 7 has not been started and its
 exact scope has not been defined by the human yet.
 
-## Before starting Phase 6
+## Before starting Phase 7
 
 Whoever (human or AI) picks this up next should:
 
-1. Read PROJECT_STATE.md and ARCHITECTURE.md's "Phase 5 - Real AI
-   Providers + Provider Portability" section (why it's shaped this way,
-   including the Freebuff-as-honest-placeholder decision and exactly
-   what was and wasn't tested) in full first.
-2. Get explicit human direction on Phase 6 scope. Candidates per the
-   Phase 1-5 briefs' future-architecture sections: strategy discovery/
-   qualification (`app/research/`), the Supervisor Agent
-   (`app/supervisor/`), the dashboard (`app/dashboard/` + `app/api/`),
-   or finishing Freebuff/testing against a real Ollama server - the
-   briefs do not say which comes first.
+1. Read PROJECT_STATE.md and ARCHITECTURE.md's "Phase 6 - Internet &
+   Strategy Research Layer" section (why it's shaped this way, including
+   the `app/research/` naming reassignment and the four real bugs caught
+   and fixed) in full first.
+2. Get explicit human direction on Phase 7 scope. Candidates per the
+   Phase 1-6 briefs' future-architecture sections: strategy qualification
+   (home no longer `app/research/` - see "Documented deviations"; needs
+   a new name when scoped), the Supervisor Agent (`app/supervisor/`), the
+   dashboard (`app/dashboard/` + `app/api/`), a real source-discovery
+   backend, or a working Freebuff/Ollama AI provider - the briefs do not
+   say which comes first.
 3. Not silently resolve ambiguity - the user's stated working style
    (see project memory) is to have ambiguities returned to them rather
    than guessed at.
 4. Run `pytest -v` before making changes, to confirm the current
-   baseline (290 tests: 30 foundation + 59 backtesting + 66 research
-   systems + 66 AI layer + 69 AI providers) still passes.
+   baseline (409 tests: 30 foundation + 59 backtesting + 66 research
+   systems + 66 AI layer + 69 AI providers + 119 internet research)
+   still passes.
 
-## Known gaps a Phase 6 system will run into
+## Known gaps a Phase 7 system will run into
 
-- **No real AI provider has ever actually been called.** `ClaudeAIProvider`
-  and `OllamaAIProvider` are tested only against mocked HTTP. The first
-  real session should start small: construct the provider directly, set
-  conservative `ResearchLimits`, and watch it closely - see
-  ARCHITECTURE.md "Phase 5 - Verification performed" for the exact
-  env vars needed (`ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL`) and what a
-  minimal smoke test looks like.
-- **Freebuff is not real.** `FreebuffAIProvider.invoke()` always raises.
-  Completing it requires a verified Freebuff API contract (base URL,
-  auth scheme, request/response shape) that was not available during
-  Phase 5 - don't guess at one; get it from the human first.
-- **Nothing in `Application`/`main.py` constructs a `ResearchAgent` or a
-  provider.** `app/ai/router.py::build_router_from_settings()` exists
-  and is config-driven, but nothing calls it outside tests/manual use.
-- **`ResearchAgent`/`CampaignRunner` both still run sequentially**,
-  called directly from Python.
-- **`strategies` table is still empty**; research sessions still record
-  `strategy_name`/`strategy_version` as plain strings.
+- **No real source-discovery backend.** `ManualSourceDiscoveryProvider`
+  structures a human-curated URL list; nothing searches the internet
+  itself. A real one needs a search API key not available this phase.
+- **PDF text extraction doesn't exist** - stdlib has no PDF parser, and
+  one wasn't added without being asked. PDFs are tracked (hashed,
+  cached) but produce no evidence.
+- **`adapter.py`'s interpreter covers a narrow subset**: close/open/
+  high/low/volume + EMA/SMA, comparison/logical/crossing operators,
+  percent-based stop/target. Anything else (a structural stop placement,
+  another indicator) comes back `adaptable=False` with specific reasons -
+  extend `adapter.py` deliberately, don't work around it.
+- **No AI-authored rule is ever `EXPLICIT`**, only `INTERPRETED` -
+  there is no deterministic quote-to-structure mapper in this codebase.
+  A future phase wanting that is building something new, not extending
+  what's here.
+- **`WebResearchAgent`/`ResearchAgent`/`CampaignRunner` all run
+  sequentially**, called directly from Python - none are wired into
+  `Application`'s lifecycle or a CLI/scheduler yet.
+- **No real AI provider has ever actually been called** (carried over
+  from Phase 5) - `ClaudeAIProvider`/`OllamaAIProvider` are tested only
+  against mocked HTTP.
+- **`strategies` table is still empty**; nothing qualifies a strategy yet.
 
-## Requirements every future phase inherits from Phases 1-5
+## Requirements every future phase inherits from Phases 1-6
 
 - Self-contained inside `C:\StrategyResearchLab` - no global installs, no
   machine-specific paths. Prefer the standard library over a new
-  dependency when the functionality fits (Phase 5's real providers added
-  zero new dependencies).
+  dependency when the functionality fits (Phases 5 and 6 both added zero
+  new dependencies this way).
 - All new persistent facts go through the existing `EventRecorder`
-  (`app/core/events.py`) and `StateManager` (`app/state/state_manager.py`)
-  rather than ad hoc files, so the dashboard has one place to read from.
+  (`app/core/events.py`) and `StateManager` (`app/state/state_manager.py`).
 - AI-provider independence: implement `AIProvider` (`app/ai/provider.py`)
-  for any new backend; never special-case a vendor inside `ResearchAgent`
-  or `AIProviderRouter`. Never hardcode or log a secret - route it
-  through `Settings.ai_provider` and redact it the way `claude.py` does.
+  for any new backend/workflow - `app/research/` reused it unchanged
+  rather than inventing a parallel abstraction; do the same.
 - **The deterministic backtesting engine (`app/backtesting/`) computes
   all financial numbers; AI never does.**
 - **Research systems (`app/systems/`) only ever produce
-  `ExperimentDefinition`s and call `ExperimentRunner`/`CampaignRunner`.
-  The AI layer (`app/ai/`) only ever produces `ExperimentProposal`s and
-  calls `CampaignRunner`** - neither layer calls `run_backtest()`
-  directly, and this is AST-verified in `tests/ai/test_safety.py`, not
-  just conventional.
+  `ExperimentDefinition`s; the AI layer (`app/ai/`) only ever produces
+  `ExperimentProposal`s; the internet research layer (`app/research/`)
+  only ever produces `StrategySpecification`s** - none of the three call
+  `run_backtest()` directly (AST-verified in each package's own
+  `test_safety.py`/`test_security.py`). A `StrategySpecification` only
+  ever becomes a `Strategy` through `adapter.py`'s safe, fixed
+  interpreter - never through generated/executed code.
+- Never let untrusted input (web content, AI output) carry authority by
+  convention alone - prefer a closed schema/enum that structurally
+  cannot express a dangerous action over a prompt that merely asks the
+  model not to do it. `WebResearchDecision`'s `ResearchAction` enum is
+  the Phase 6 example; keep doing this.
 - Do not pretend something works if it was only built, not tested - say
-  so explicitly in the completion report (Freebuff and real-provider
-  calls were called out this way in Phase 5; keep doing that).
+  so explicitly in the completion report, the way Freebuff, the real AI
+  providers, PDF extraction, and search-engine discovery were all called
+  out this way.
 - Update PROJECT_STATE.md, ARCHITECTURE.md, and PHASE_HISTORY.md at the
-  end of the phase, the same way Phases 1-5 did.
+  end of the phase, the same way Phases 1-6 did.
