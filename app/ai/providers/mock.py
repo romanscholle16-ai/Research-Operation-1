@@ -13,10 +13,19 @@ from __future__ import annotations
 
 from app.ai.decision import ResearchDecision
 from app.ai.limits import StoppingReason
-from app.ai.provider import AIInvocationRequest, AIInvocationResponse, AIProvider, AIProviderError
+from app.ai.provider import (
+    AIInvocationRequest,
+    AIInvocationResponse,
+    AIProvider,
+    AIProviderError,
+    ProviderCapabilities,
+)
 
 
 class MockAIProvider(AIProvider):
+    is_mock = True
+    capabilities = ProviderCapabilities(structured_output=True, local_offline=True)
+
     def __init__(
         self,
         script: dict[int, ResearchDecision],
@@ -54,6 +63,7 @@ class AlwaysFailingAIProvider(AIProvider):
 
     provider_name = "always_failing_mock"
     model_name = "n/a"
+    is_mock = True
 
     def invoke(self, request: AIInvocationRequest) -> AIInvocationResponse:
         raise AIProviderError("mock provider configured to always fail")

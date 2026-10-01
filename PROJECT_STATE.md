@@ -1,8 +1,8 @@
 # Project State
 
-**Active phase:** Phase 4 - AI Research Layer
+**Active phase:** Phase 5 - Real AI Providers + Provider Portability
 **Status:** Complete
-**Last updated:** 2026-09-29
+**Last updated:** 2026-09-30
 
 This file is written for another AI (or human) with no access to prior
 conversation history. It describes what actually exists and has been
@@ -136,24 +136,60 @@ phases.
   no `DELETE FROM` anywhere in the package). Synthetic data and mock
   strategies/providers only.
 
+- Real AI provider adapters behind the unchanged Phase 4 `AIProvider`
+  interface (`app/ai/providers/`): `ClaudeAIProvider` (real Anthropic
+  Messages API adapter, stdlib `urllib` HTTP, forced tool-use for
+  structured output, no new dependency); `OllamaAIProvider` (real local
+  Ollama `/api/chat` adapter, same stdlib-HTTP approach); `FreebuffAIProvider`
+  (an honest structural placeholder only - no verified API contract was
+  available, so it is wired into the architecture but `invoke()` always
+  raises, clearly explaining why). A shared, strict JSON parser
+  (`app/ai/providers/structured_output.py`) is the one place any
+  JSON-returning provider's output becomes a `ResearchDecision` -
+  rejecting malformed output deterministically rather than guessing. A
+  new `AIProviderRouter` (`app/ai/router.py`) itself implements
+  `AIProvider`, so `ResearchAgent` needs zero code changes to use it; it
+  selects/falls back between providers by configuration
+  (`Settings.ai_provider`, extended with a fallback chain and an
+  explicit mock-fallback gate) and never silently falls back from a
+  failed real provider onto a mock one. Three new `AIProviderError`
+  subclasses (auth/rate-limit/unavailable), a `ProviderCapabilities`
+  model, usage/cost/request-id tracking on `AIInvocationResponse`, and a
+  shared `RESEARCH_POLICY` prompt text complete the picture. See
+  ARCHITECTURE.md "Phase 5 - Real AI Providers + Provider Portability"
+  for the full design, including exactly what's untested and why
+  (no credentials/local server were available in this environment).
+- 69 new automated tests (`tests/ai/`, 290 total with Phases 1-4), all
+  passing: structured-output parsing (strict rejection of malformed
+  input), both real providers against a mocked HTTP transport (success,
+  auth/rate-limit/server/network/timeout error mapping, secret
+  redaction), the Freebuff placeholder's honesty, the router (primary-
+  only, real-to-real fallback, mock-fallback gating, invalid provider
+  names), a cross-provider contract suite, and security checks (no
+  eval/exec/subprocess in `app/ai/`, no secret ever persisted to
+  `events`/`ai_actions`, `.env.example`/`.gitignore` still safe). Zero
+  real network calls or credentials used; one real-but-expected-to-fail
+  call against the confirmed-absent local Ollama server.
+
 ## What has been completed
 
 Phase 1 (all 15 requirements), Phase 2 (all 24 requirements), Phase 3
-(all 21 requirements), and Phase 4 (all 26 requirements) from their
-respective briefs: see PHASE_HISTORY.md for what each phase built and
-why.
+(all 21 requirements), Phase 4 (all 26 requirements), and Phase 5 (all
+31 requirements) from their respective briefs: see PHASE_HISTORY.md for
+what each phase built and why.
 
-## What remains (explicitly out of Phase 4 scope)
+## What remains (explicitly out of Phase 5 scope)
 
 - Actual trading strategies (only mock/scripted ones exist, solely to
-  validate the engine and research systems), real AI provider
-  integration (Claude/Freebuff/Ollama), automatic provider switching,
-  browser automation, autonomous strategy discovery, strategy
-  qualification, live trading / exchange execution, the full dashboard,
-  the Supervisor Agent, a 24/7 autonomous loop, Monte Carlo,
-  sophisticated regime detection, distributed workers, and large
-  historical data downloads. See CURRENT_TASK.md and ARCHITECTURE.md's
-  "Future expansion points".
+  validate the engine and research systems), a working Freebuff
+  integration (no verified API contract yet), real-provider smoke
+  testing (no credentials were available), a running local model server
+  to test `OllamaAIProvider` against, browser automation, autonomous
+  strategy discovery, strategy qualification, live trading / exchange
+  execution, the full dashboard, the Supervisor Agent, a 24/7 autonomous
+  loop, Monte Carlo, sophisticated regime detection, distributed
+  workers, and large historical data downloads. See CURRENT_TASK.md and
+  ARCHITECTURE.md's "Future expansion points".
 
 ## Important technical state
 
@@ -163,15 +199,20 @@ why.
 - `Settings.project_root` and every path derived from it are computed
   relative to the location of `app/config/settings.py`, not hardcoded -
   cloning this repo to a different drive/path requires no config changes.
-- No REAL AI provider is wired up yet (`AI_ACTIVE_PROVIDER=none` by
-  default in `Settings`, which is unrelated to and not read by
-  `app/ai/` - the AI layer takes its `AIProvider` as an explicit
-  constructor argument, currently only satisfiable by `MockAIProvider`).
+- Real `AIProvider` adapters now exist (`ClaudeAIProvider`,
+  `OllamaAIProvider`) but neither has been exercised against a real
+  backend - no `ANTHROPIC_API_KEY` and no reachable Ollama server were
+  available while building Phase 5. `Settings.ai_provider.active_provider`
+  (`AI_ACTIVE_PROVIDER`) now also accepts `mock`, and
+  `app/ai/router.py::build_router_from_settings()` is the config-driven
+  way to construct a provider/router from `Settings` - but nothing in
+  `app/core`/`main.py` calls it yet; a `ResearchAgent` is still
+  constructed directly in Python with an explicit `AIProvider` instance.
   `app/agents/` is still an empty placeholder package - the AI research
   layer was built at `app/ai/` instead; see ARCHITECTURE.md "Documented
   deviations" for why. The backtesting engine has zero AI involvement by
-  design - see ARCHITECTURE.md "Core principle" - and the AI layer built
-  in Phase 4 does not change that: it reads `BacktestResult` data, never
+  design - see ARCHITECTURE.md "Core principle" - and nothing in Phase 4
+  or 5 changes that: the AI layer reads `BacktestResult` data, never
   computes it.
 - `Application.run()` currently just calls `startup()` then `shutdown()`
   with nothing in between - this is intentional (see ARCHITECTURE.md);
@@ -197,3 +238,10 @@ why.
   `strategy_version` as plain strings, not a `strategies` row - see
   ARCHITECTURE.md "Future expansion points" for why that's deferred to
   strategy discovery/qualification.
+- Database schema is still at version 4 - Phase 5 added no tables
+  (provider/router state is entirely in-process; AI invocation audit
+  logging reuses Phase 1's `ai_actions` table unchanged, just with more
+  metadata keys).
+- `pyproject.toml` is unchanged by Phase 5 - both real provider adapters
+  use stdlib `urllib.request`, not the `anthropic` package or any Ollama
+  client library (see ARCHITECTURE.md "Phase 5 - No new dependency").

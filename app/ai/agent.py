@@ -16,6 +16,8 @@ what makes "the AI cannot expand its own research budget" true).
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from app.ai import persistence as ai_persistence
 from app.ai.catalog import ResearchCatalog
 from app.ai.context import build_research_context
@@ -201,16 +203,19 @@ class ResearchAgent:
         self._events.record(
             EventType.AI_INVOCATION_STARTED, category="ai", payload={"iteration": iteration}, related_id=session_id
         )
+        request_started_at = datetime.now(timezone.utc)
         try:
             response = self._provider.invoke(
                 AIInvocationRequest(session_id=session_id, iteration=iteration, purpose="propose_experiments", context=context)
             )
         except AIProviderError as exc:
+            completed_at = datetime.now(timezone.utc)
+            error_category = type(exc).__name__
             self._events.record(
                 EventType.AI_INVOCATION_FAILED,
                 category="ai",
                 message=str(exc),
-                payload={"iteration": iteration},
+                payload={"iteration": iteration, "error_category": error_category},
                 related_id=session_id,
             )
             ai_persistence.record_ai_action(
@@ -220,10 +225,18 @@ class ResearchAgent:
                 related_id=session_id,
                 prompt_summary=context.summary(),
                 result_summary=f"ERROR: {exc}",
+                metadata={
+                    "success": False,
+                    "error_category": error_category,
+                    "request_timestamp": request_started_at.isoformat(),
+                    "completion_timestamp": completed_at.isoformat(),
+                    "duration_seconds": (completed_at - request_started_at).total_seconds(),
+                },
             )
             self._log.error("AI invocation failed", extra={"session_id": session_id, "iteration": iteration, "error": str(exc)})
             return None
 
+        completed_at = datetime.now(timezone.utc)
         self._events.record(
             EventType.AI_INVOCATION_COMPLETED,
             category="ai",
@@ -237,7 +250,20 @@ class ResearchAgent:
             related_id=session_id,
             prompt_summary=context.summary(),
             result_summary=response.raw_summary[:2000],
-            metadata={"model": response.model_name},
+            metadata={
+                "model": response.model_name,
+                "success": True,
+                "request_timestamp": request_started_at.isoformat(),
+                "completion_timestamp": completed_at.isoformat(),
+                "duration_seconds": (completed_at - request_started_at).total_seconds(),
+                "input_tokens": response.input_tokens,
+                "output_tokens": response.output_tokens,
+                "total_tokens": response.total_tokens,
+                "estimated_cost": response.estimated_cost,
+                "request_id": response.request_id,
+                "response_id": response.response_id,
+                "fallback_chain": list(response.fallback_chain) if response.fallback_chain else None,
+            },
         )
         return response.decision
 

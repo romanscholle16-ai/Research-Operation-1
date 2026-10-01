@@ -1,8 +1,9 @@
 # Architecture
 
 Status: reflects Phase 1 (Foundation), Phase 2 (Deterministic
-Backtesting Engine), Phase 3 (Five Independent Research Systems), and
-Phase 4 (AI Research Layer). Updated as later phases land.
+Backtesting Engine), Phase 3 (Five Independent Research Systems),
+Phase 4 (AI Research Layer), and Phase 5 (Real AI Providers + Provider
+Portability). Updated as later phases land.
 
 ## Goals driving the design
 
@@ -742,6 +743,237 @@ not by a separate normalization step: a proposal becomes a real
 exactly as if a human had typed the equivalent request by hand - there
 is no AI-specific fingerprinting code path to diverge.
 
+## Phase 5 - Real AI Providers + Provider Portability
+
+Phase 4 built the `AIProvider` interface and shipped `MockAIProvider` as
+its only implementation. Phase 5 adds real provider adapters behind that
+same interface, plus a router that selects/falls back between them by
+configuration - without changing `ResearchAgent` at all.
+
+```
+ResearchAgent
+      v
+AIProvider interface      <- unchanged since Phase 4
+      v
+AIProviderRouter            <- new; itself implements AIProvider
+      v
+Claude / Ollama / Freebuff / Mock
+```
+
+### Providers implemented, and how honestly
+
+| Provider | Status | Tested how |
+|---|---|---|
+| `ClaudeAIProvider` | Real adapter, stdlib HTTP to the Anthropic Messages API, forced tool-use for structured output | Mocked HTTP only - no `ANTHROPIC_API_KEY` was available in this environment (see "Verification performed" below) |
+| `OllamaAIProvider` | Real adapter, stdlib HTTP to a local Ollama server's `/api/chat` | Mocked HTTP for success/parsing; the "server unreachable" path is a REAL call against the confirmed-absent default `localhost:11434` |
+| `FreebuffAIProvider` | Structural placeholder ONLY - `invoke()` always raises | Tested only for "it fails honestly and says why"; see its module docstring |
+| `MockAIProvider` | Unchanged from Phase 4 | Still the only provider every other test in this project relies on |
+
+Section 7 of the brief is explicit that an unverifiable provider must
+not be faked: "If Freebuff requires external installation/configuration
+that cannot be completed project-locally: DO NOT improvise... Do not
+pretend a provider is implemented if it is only a placeholder." No
+Freebuff API documentation (base URL, auth scheme, request/response
+shape) was available while building this phase, so
+`app/ai/providers/freebuff.py` is exactly that: wired into the registry
+and type-compatible with `AIProvider`, but not connected to anything
+real. Completing it is a matter of following `claude.py`'s pattern once
+that documentation exists - see the module's docstring for the specific
+pieces needed.
+
+Similarly, Ollama itself was not installed - it is ordinary desktop
+software with its own system installer, and installing it would mean
+adding something outside this project's self-contained `.venv` without
+being asked to (brief sections 4/8/30). `OllamaAIProvider`'s code exists
+and is unit-tested against a mocked transport, but "local inference
+works" is not a claim this phase makes - only "the adapter code is
+correct against the documented Ollama HTTP contract, as mocked."
+
+### No new dependency
+
+Both real adapters use `urllib.request` (stdlib) rather than the
+`anthropic` package or any Ollama client library. The Messages API and
+Ollama's `/api/chat` are both documented, stable JSON-over-HTTP
+contracts - comfortably within what stdlib handles cleanly - and this
+project's stated preference (Phase 1) is no unnecessary dependencies.
+`pyproject.toml` is unchanged by this phase. A future phase can swap in
+the official SDK behind the same `AIProvider` interface if streaming or
+other SDK-only features become necessary; nothing else would need to
+change.
+
+### Structured output, enforced the same way regardless of provider
+
+`app/ai/providers/structured_output.py::research_decision_from_dict()`
+is the ONE parser from "JSON-ish dict a provider handed back" into
+`ResearchDecision`/`ExperimentProposal` (brief section 13: "Do not
+create a second competing AI decision schema"). Both `ClaudeAIProvider`
+and `OllamaAIProvider` call it; neither has its own parsing logic beyond
+extracting the raw dict from its vendor's response envelope (Claude: the
+forced tool-use block's `input`; Ollama: `json.loads()`-ing
+`message.content` since Ollama's `format: "json"` option returns a JSON
+string, not a nested object). The parser is deliberately strict: a
+missing required field or wrong-typed value raises
+`AIProviderResponseError` immediately rather than being defaulted or
+guessed at (brief section 12 - "do not silently 'fix' invalid AI
+instructions"). This is parsing only - "is this well-formed input for
+our schema" - not policy; `app/ai/validation.py::validate_proposal()`
+(Phase 4, unchanged) still runs afterward to check "is this an
+experiment our catalog actually allows," exactly as it does for the mock
+provider.
+
+### Provider error taxonomy
+
+`app/ai/provider.py` gained three new `AIProviderError` subclasses:
+`AIProviderAuthError`, `AIProviderRateLimitError`,
+`AIProviderUnavailableError` (alongside Phase 4's `AIProviderTimeoutError`/
+`AIProviderResponseError`). Each real adapter maps its own
+vendor-specific failures onto these - Claude's HTTP 401/429/5xx, URL
+errors, and timeouts; Ollama's connection-refused/timeout/malformed-JSON
+- so `ResearchAgent` and `AIProviderRouter` only ever need to catch the
+common base class, never a vendor-specific exception type.
+
+### Provider capabilities (brief section 17)
+
+`ProviderCapabilities` (`app/ai/provider.py`) is a plain, boolean-flags
+dataclass each provider sets as a class attribute: `structured_output`,
+`tool_calling`, `token_usage_reporting`, `streaming`, `model_selection`,
+`configurable_temperature`, `local_offline`. No capability is required -
+`FreebuffAIProvider` honestly reports every flag `False` (brief:
+"claims no capabilities it has not verified") rather than claiming
+parity with the real adapters.
+
+### Usage/cost tracking (brief section 16)
+
+`AIInvocationResponse` gained `input_tokens`/`output_tokens`/
+`total_tokens`/`estimated_cost`/`request_id`/`response_id` - all
+`None` by default, populated by a provider only from fields its own API
+response actually contains (Claude's `usage.input_tokens`/
+`output_tokens` from the Messages API; Ollama's `prompt_eval_count`/
+`eval_count` from its chat response). Neither adapter invents a dollar
+cost figure - Anthropic's Messages API doesn't return one, so
+`estimated_cost` stays `None` for Claude; local inference has no
+per-call provider cost, so it stays `None` for Ollama too (brief: "If a
+provider does not expose cost information, store null rather than
+inventing a value").
+
+### Provider metadata and audit (brief section 15)
+
+`ResearchAgent._invoke_provider()` (unchanged in control flow since
+Phase 4, extended in what it records) now times each invocation
+(`request_timestamp`/`completion_timestamp`/`duration_seconds`) and
+passes the response's usage/cost/id fields plus a `success`/
+`error_category` flag into `ai_actions.metadata` - reusing Phase 4's
+existing audit table and `record_ai_action()` call, no new table and no
+new persistence code path. `prompt_summary`/`result_summary` remain the
+same bounded `ResearchContext.summary()`/`AIInvocationResponse.
+raw_summary` strings as Phase 4; nothing about Phase 5 widens what gets
+logged beyond adding these specific, bounded metadata fields.
+
+### Provider router and fallback (brief sections 9-10)
+
+`AIProviderRouter` (`app/ai/router.py`) itself implements `AIProvider` -
+`ResearchAgent` passes it as `provider` exactly like any single provider
+and needs no changes at all; this is the literal mechanism behind
+"ResearchAgent must not need to know which provider is being used."
+`invoke()` tries its chain in order and returns the first success,
+annotating the response's `fallback_chain` with every provider name
+tried when more than one was needed.
+
+The one deliberate asymmetry (brief section 10): a chain entry at index
+0 (the primary) may be `mock` with no special gating - explicitly
+choosing mock as your provider is unambiguous, intentional
+configuration. Any FALLBACK entry (index > 0) that is a mock provider is
+skipped unless the router was built with `allow_mock_fallback=True`.
+Without that flag, a real provider's failure surfaces as a normal
+`AIProviderError` (session `FAILED`, `provider_error`) rather than
+silently and invisibly continuing on fake data - exactly the brief's
+"REAL PROVIDER -> MOCK should require explicit test/development
+configuration."
+
+`build_provider(name, settings)` / `build_router_from_settings(settings)`
+are the configuration-driven entry points (brief section 9), reusing
+Phase 1's `Settings.ai_provider` rather than inventing a parallel config
+system: `AI_ACTIVE_PROVIDER` (now also accepting `mock`, in addition to
+Phase 1's `none`/`anthropic`/`freebuff`/`ollama`; `claude` is accepted as
+an alias for `anthropic`) selects the primary, two new fields -
+`AI_PROVIDER_FALLBACK_CHAIN` (comma-separated names) and
+`AI_ALLOW_MOCK_FALLBACK` - configure the rest. An unknown provider name
+raises `ProviderConfigurationError` immediately (brief: "invalid
+provider configuration fails clearly").
+
+### Research policy / prompt management (brief section 14)
+
+`app/ai/policy.py::RESEARCH_POLICY` is one plain-text constant stating
+the fixed rules (no financial calculation, no bypassing CampaignRunner,
+can't touch its own limits, can't alter history, no live trading,
+propose-don't-optimize, robustness over one metric) that both real
+adapters prepend as their system prompt - not duplicated per-provider
+phrasing. This text is a hint to the model, not an enforcement
+mechanism; the actual enforcement is unchanged from Phase 4 (the typed/
+validated pipeline), and holds regardless of what any prompt says or
+whether a provider ignores it.
+
+### Security (brief section 19)
+
+- API keys come only from `Settings.ai_provider` (environment/`.env`,
+  Phase 1), passed as constructor arguments - never hardcoded, never
+  logged in full. `app/ai/providers/secrets.py::redact()` scrubs the
+  configured key out of any HTTP error body before it becomes part of an
+  `AIProviderError` message (`tests/ai/test_claude_provider.py::
+  test_auth_error_is_mapped_and_key_is_redacted`).
+- `tests/ai/test_security.py::
+  test_secret_never_appears_in_persisted_events_or_ai_actions` drives a
+  real (mocked-failure) `ClaudeAIProvider` through a full `ResearchAgent`
+  session and inspects every persisted `events`/`ai_actions` row for the
+  literal key value.
+- AST-verified (same technique as Phase 4's `test_safety.py`, for the
+  same docstring-false-positive reason): no file in `app/ai/` calls
+  `eval`/`exec` or imports `subprocess` - provider responses are parsed
+  into typed dataclasses, never executed.
+- `ExperimentProposal` (Phase 4, unchanged) has no path/command/shell/
+  script-shaped field - a malicious prompt-injected proposal has nowhere
+  to put a shell command even if it tried; it would just be rejected or
+  ignored data, same as a nonsense `research_system` name.
+- `.env.example` still contains only empty placeholders for
+  `ANTHROPIC_API_KEY`/`FREEBUFF_API_KEY`; `.gitignore` still excludes
+  `.env` (both verified by tests).
+
+### Determinism (brief section 18)
+
+Nothing about Phase 5 touches `compute_fingerprint()`/
+`compute_experiment_fingerprint()` (Phase 2/3, unchanged) - a real
+provider's nondeterminism lives entirely upstream of
+`ExperimentDefinition`, which is still built the same deterministic way
+regardless of which provider produced the `ResearchDecision` it came
+from. `AIInvocationResponse`'s new usage/cost/id/fallback fields live on
+the RESPONSE, never on `ResearchDecision`/`ExperimentProposal`
+themselves, so there is no field for provider metadata to leak into a
+fingerprint even by accident.
+
+### Verification performed
+
+No credentials were available in this environment for any real
+provider (`ANTHROPIC_API_KEY`, `FREEBUFF_API_KEY` both unset; no Ollama
+server reachable at `localhost:11434`) - confirmed by checking the
+environment directly before writing any provider code, not assumed. Per
+brief section 22, the human was not asked to supply credentials in
+chat; instead:
+
+- `ClaudeAIProvider` and `OllamaAIProvider` are tested entirely against
+  a mocked transport (`monkeypatch`-replacing a single, deliberately
+  small `_http_post_json` function each adapter calls) - no network
+  access, no API key, required or used.
+- `OllamaAIProvider`'s "server unreachable" test makes a REAL call
+  against the confirmed-absent default endpoint - a genuine, reproducible
+  failure path rather than a simulated one.
+- The real-provider smoke test section 22 describes is explicitly
+  **NOT RUN** - there is nothing to run it against. To exercise it:
+  set `ANTHROPIC_API_KEY` (and optionally `ANTHROPIC_MODEL`) in `.env`
+  and construct a `ClaudeAIProvider` directly; a single
+  `provider.invoke(...)` call is sufficient and is all the brief asks
+  for - do not launch a `ResearchAgent` session against a real provider
+  without also setting conservative `ResearchLimits`.
+
 ## Documented deviations from the Phase 1 brief's example tree
 
 - **`logs/` subfolders.** The brief's example tree lists
@@ -787,11 +1019,20 @@ is no AI-specific fingerprinting code path to diverge.
   `ExperimentRecord` already carries parameters, rule/execution
   configuration, data range, and a `backtest_run_id` pointing at the full
   `BacktestResult`.
-- **Real AI providers** (`app/ai/providers/`): Phase 4 built the
-  provider abstraction and `MockAIProvider` only. Claude/Freebuff/Ollama-
-  backed providers, and switching between them, are Phase 5+ - see
-  "Phase 4 - AI Research Layer" above. Adding one means implementing
-  `AIProvider.invoke()`; nothing in `ResearchAgent` should need to change.
+- **A working Freebuff provider**: `FreebuffAIProvider` is a structural
+  placeholder (see "Phase 5" above) pending a verified API contract.
+  Completing it means implementing `invoke()` following `claude.py`'s
+  pattern - nothing in `ResearchAgent`/`AIProviderRouter` should need to
+  change.
+- **Real-provider smoke testing**: no credentials were available during
+  Phase 5 (see "Phase 5 - Verification performed"); a future session
+  with `ANTHROPIC_API_KEY` set should run the minimal smoke test that
+  section describes before relying on `ClaudeAIProvider` for anything
+  beyond mocked tests.
+- **Ollama actually running**: `OllamaAIProvider`'s code is tested
+  against a mocked transport only - installing/running a real local
+  model server (outside this project, per the brief's constraints) and
+  confirming end-to-end inference is still open.
 - **Strategy qualification consuming AI research sessions**: an
   `ai_research_sessions` row plus its linked `research_experiments`
   already carries everything a qualification system (see "Strategy

@@ -409,3 +409,133 @@ window) segmentation method for AI proposals specifically (not simply
 JSON-safe the way the other three segmentation methods are - the other
 Phase 3 systems still support it when called directly, just not yet
 through an `ExperimentProposal`).
+
+## Phase 5 - Real AI Providers + Provider Portability
+
+**Completed:** 2026-09-30
+**Status:** Complete
+
+### Starting point
+
+Phase 1-4 baseline (221 tests) re-verified green before any change.
+Environment checked directly (not assumed) for real-provider
+credentials/servers: no `ANTHROPIC_API_KEY`, no `FREEBUFF_API_KEY`, no
+`.env` file, and no Ollama server reachable at the default
+`localhost:11434` - all confirmed absent before writing any provider
+code, which shaped what could honestly be tested (see "Verification
+performed" below).
+
+### What was built
+
+Real `AIProvider` adapters behind Phase 4's unchanged interface:
+`ClaudeAIProvider` (Anthropic Messages API via stdlib `urllib`, forced
+tool-use for structured output) and `OllamaAIProvider` (local Ollama
+`/api/chat` via the same stdlib approach), plus `FreebuffAIProvider`, an
+explicit structural placeholder. A shared strict JSON parser
+(`structured_output.py`) is the one path from any provider's raw output
+to a `ResearchDecision`. A new `AIProviderRouter` implements `AIProvider`
+itself and selects/falls back between providers by configuration,
+reusing and extending Phase 1's `Settings.ai_provider`. Three new error
+subclasses, a `ProviderCapabilities` model, usage/cost/id tracking on
+`AIInvocationResponse`, a shared `RESEARCH_POLICY` prompt, and a secret-
+redaction helper round out the picture. 69 new tests in `tests/ai/`
+(290 total). Full design writeup: ARCHITECTURE.md "Phase 5 - Real AI
+Providers + Provider Portability".
+
+### Key decisions
+
+- **No new dependency - both real adapters use stdlib `urllib.request`**,
+  not the `anthropic` package or an Ollama client library. Both target
+  APIs are documented, stable JSON-over-HTTPS/HTTP contracts well within
+  stdlib's reach, and this project has stated a "no unnecessary
+  dependencies" preference since Phase 1. `pyproject.toml` is unchanged.
+- **Freebuff was built as an honest placeholder, not a guess.** No
+  verified API contract (base URL, auth scheme, request/response shape)
+  was available. The brief was explicit that improvising one was worse
+  than not building it - a wrong guess could silently call the wrong
+  thing in the wrong shape and look "done" while being completely
+  disconnected from reality. `FreebuffAIProvider` is a real
+  `AIProvider` subclass (proving the interface doesn't need to change
+  for a real one later) whose `invoke()` always raises, explaining
+  exactly what's missing.
+- **Ollama was not installed.** It is ordinary desktop software with its
+  own system installer; installing it would mean adding something
+  outside the project's self-contained `.venv` without being asked.
+  `OllamaAIProvider`'s code exists and is unit-tested against a mocked
+  transport, including one test that makes a REAL call against the
+  confirmed-absent default endpoint to prove the "unavailable" path
+  without faking it.
+- **One shared JSON parser for every provider, not one per vendor.**
+  `structured_output.py::research_decision_from_dict()` is strict:
+  a missing/wrong-typed required field raises immediately rather than
+  being defaulted or guessed at, per the brief's "do not silently 'fix'
+  invalid AI instructions when doing so could alter intent or safety."
+  Both real adapters extract their vendor's raw dict (Claude: a forced
+  tool-use block's `input`; Ollama: `json.loads()` of `message.content`)
+  and hand it to the exact same function.
+- **`AIProviderRouter` implements `AIProvider` itself**, rather than
+  being a separate concept `ResearchAgent` would need to know about -
+  this is what makes "ResearchAgent must not need to know which provider
+  is being used" literally true: it receives a router exactly as it
+  would receive any single provider.
+- **Mock-as-primary is unrestricted; mock-as-fallback requires an
+  explicit flag.** `AIProviderRouter` only gates chain positions after
+  the first - deliberately choosing mock as your provider is
+  unambiguous configuration, but a REAL provider silently degrading to
+  mock on failure would let a "real" research session look successful
+  while running on fake data. `AI_ALLOW_MOCK_FALLBACK` must be set
+  explicitly for the latter to ever happen.
+- **"claude" and "anthropic" both select the same provider.** The Phase
+  5 brief's router example uses "claude"; Phase 1's `AI_ACTIVE_PROVIDER`
+  convention (already shipped, already documented) used "anthropic" for
+  the same vendor. Rather than picking one and quietly breaking
+  compatibility with the other, `build_provider()` accepts both.
+- **Provider usage/cost/diagnostics reuse Phase 1's `ai_actions` table**
+  via its existing `metadata` JSON column - no new table, no new
+  persistence code path. `ResearchAgent._invoke_provider()`'s control
+  flow is unchanged from Phase 4; it now additionally times each call
+  and forwards the response's usage/cost/id fields into that same
+  `record_ai_action()` call.
+- **No estimated cost is invented.** Anthropic's Messages API doesn't
+  return a dollar figure and local inference has no per-call provider
+  cost, so `estimated_cost` stays `None` for both real adapters, per the
+  brief's explicit "store null rather than inventing a value."
+
+### Verification performed
+
+- `pytest -v`: 290/290 passed (221 from Phases 1-4 unchanged + 69 new),
+  run before starting (baseline check) and after every module was wired
+  together.
+- Manual smoke tests via the real venv interpreter (outside pytest,
+  mirroring the discipline from every prior phase): the router's
+  primary/fallback/mock-gating logic; `ClaudeAIProvider` against a
+  hand-built fake HTTP response (successful parse + token usage, then
+  401/429/malformed-response cases, confirming the configured API key
+  never appeared in a raised exception's message); `OllamaAIProvider`
+  against the real, confirmed-absent `localhost:11434` (correctly raised
+  `AIProviderUnavailableError`) and against a mocked successful
+  response; a full `ResearchAgent` session driven by an
+  `AIProviderRouter` wrapping `MockAIProvider`, confirming zero
+  `ResearchAgent` code changes were needed for the router to work;
+  `FreebuffAIProvider.invoke()` confirmed to raise with a clear
+  explanation.
+- Every automated test exercising `ClaudeAIProvider`/`OllamaAIProvider`
+  mocks the HTTP transport (`_http_post_json`) rather than using real
+  network access or credentials, per brief section 21/22 - no API key
+  was required anywhere in the test suite.
+
+### Deferred to later phases
+
+Everything in the Phase 5 brief's "DO NOT ADD YET" section: browser
+research, web scraping, internet strategy discovery, autonomous
+strategy qualification, the dashboard, a Windows `.exe`, the Supervisor
+Agent, 24/7 operation, live trading, exchange APIs, Monte Carlo, ML
+regime detection, distributed execution, large historical data
+downloads, and sophisticated multi-agent collaboration. Also not built
+(future scope, explicitly flagged rather than faked): a working Freebuff
+integration (no verified API contract), a real-provider smoke test (no
+credentials available), and confirmation that `OllamaAIProvider` works
+against an actual running Ollama server (none installed). `main.py`/
+`Application` still do not construct or use a `ResearchAgent`/provider
+of any kind - that wiring remains open for whichever future phase
+actually needs the AI layer to run as part of the application lifecycle.

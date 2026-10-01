@@ -3,7 +3,7 @@
 A local, autonomous trading-strategy research laboratory. Runs on Windows,
 Python 3.12+, entirely self-contained inside this project folder.
 
-**Current phase:** Phase 4 - AI Research Layer.
+**Current phase:** Phase 5 - Real AI Providers + Provider Portability.
 See [CURRENT_TASK.md](CURRENT_TASK.md) for the active task,
 [PROJECT_STATE.md](PROJECT_STATE.md) for what exists today, and
 [ARCHITECTURE.md](ARCHITECTURE.md) for how it fits together.
@@ -37,6 +37,19 @@ Loads configuration, initializes logging/database/state, emits
 has no autonomous loop yet - later phases replace the body of
 `Application.run()` (`app/core/app.py`) with a supervised long-running
 loop.
+
+## AI providers
+
+`app/ai/` can run research sessions through a mock provider (no
+credentials needed) or real ones. Select via `.env` (see
+`.env.example`): `AI_ACTIVE_PROVIDER=mock|claude|ollama|freebuff`, with
+optional `AI_PROVIDER_FALLBACK_CHAIN`/`AI_ALLOW_MOCK_FALLBACK`. Claude
+needs `ANTHROPIC_API_KEY`; Ollama needs a server already running at
+`OLLAMA_BASE_URL` (not installed by this project); Freebuff is currently
+a placeholder only - see ARCHITECTURE.md "Phase 5" for what's untested
+and why. No AI provider ever calculates financial results or bypasses
+`CampaignRunner` - see `app/ai/policy.py` and ARCHITECTURE.md's safety
+sections.
 
 ## Testing
 

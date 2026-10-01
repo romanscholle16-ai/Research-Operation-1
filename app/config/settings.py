@@ -168,18 +168,29 @@ class AIProviderConfig:
     string key, and provider-specific API keys are read from environment
     variables only - never hardcoded, never committed."""
 
-    active_provider: str = "none"  # none | anthropic | freebuff | ollama
+    active_provider: str = "none"  # none | mock | anthropic (alias: claude) | freebuff | ollama
     anthropic_api_key: str | None = None
+    anthropic_model: str = "claude-sonnet-5"
     freebuff_api_key: str | None = None
     ollama_base_url: str = "http://localhost:11434"
+    # Comma-separated provider names tried in order if active_provider fails
+    # (Phase 5 brief section 10). Empty = no fallback.
+    fallback_chain: str = ""
+    # A fallback entry of "mock" is only ever used if this is explicitly
+    # true - never silently, so a "real" research session can't end up
+    # quietly running on fake data (Phase 5 brief section 10).
+    allow_mock_fallback: bool = False
 
     @classmethod
     def from_env(cls) -> "AIProviderConfig":
         return cls(
             active_provider=_env_str("AI_ACTIVE_PROVIDER", cls.active_provider),
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY") or None,
+            anthropic_model=_env_str("ANTHROPIC_MODEL", cls.anthropic_model),
             freebuff_api_key=os.environ.get("FREEBUFF_API_KEY") or None,
             ollama_base_url=_env_str("OLLAMA_BASE_URL", cls.ollama_base_url),
+            fallback_chain=_env_str("AI_PROVIDER_FALLBACK_CHAIN", cls.fallback_chain),
+            allow_mock_fallback=_env_bool("AI_ALLOW_MOCK_FALLBACK", cls.allow_mock_fallback),
         )
 
 
